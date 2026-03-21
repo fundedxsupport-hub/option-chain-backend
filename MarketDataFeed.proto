@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package com.upstox.marketdatafeeder.rpc.proto;
+
+message MarketDataFeed {
+    map<string, MarketFullFeed> feeds = 1;
+}
+
+message MarketFullFeed {
+    oneof full_feed {
+        IndexFullFeed index_feed = 1;
+        LTPFullFeed ltp_feed = 2;
+    }
+}
+
+message IndexFullFeed {
+    double last_traded_price = 1;
+    int64 last_traded_time = 2;
+}
+
+message LTPFullFeed {
+    double last_traded_price = 1;
+    int64 last_traded_time = 2;
+}
