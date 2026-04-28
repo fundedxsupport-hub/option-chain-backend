@@ -6,107 +6,256 @@ import MarketDataFeed_pb2 as pb2
 from google.protobuf.json_format import MessageToDict
 from dotenv import load_dotenv
 import requests
-import pandas as pd # CSV read karne ke liye
+import pandas as pd
+from fastapi import FastAPI
+import threading
 
-# .env loading
+app = FastAPI()
+option_chain_data = {}
+instrument_meta = {}
+
 load_dotenv()
+TOKEN = (os.getenv("UPSTOX_ACCESS_TOKEN") or os.getenv("ACCESS_TOKEN") or "").strip()
 
-# ✅ AAPKA ASLI TOKEN (Wapas daal diya hai)
-TOKEN = os.getenv("ACCESS_TOKEN") or "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIyREFNNDUiLCJqdGkiOiI2OWJlMmJlZjkzM2UwNzZmNTU4NGVlMGIiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3NDA3MDc2NywiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc0MTMwNDAwfQ._QSI4dlJD94xtntJJ8PFQ688a7eXvNzgvvnYdbRCVac"
 
 class UpstoxDataFetcher:
     def __init__(self):
         self.websocket = None
 
     def get_authorized_ws_url(self):
-        """Upstox se authorized URL lene ke liye"""
         url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
         headers = {
             "Authorization": f"Bearer {TOKEN}",
-            "Accept": "application/json"
+            "Accept": "*/*",
         }
+
         try:
             response = requests.get(url, headers=headers)
             if response.status_code != 200:
-                print("❌ Auth URL Error:", response.text)
+                print("Auth URL Error:", response.status_code, response.text)
                 return None
+
             data = response.json()
             return data["data"]["authorized_redirect_uri"]
         except Exception as e:
-            print(f"❌ Auth Request Failed: {e}")
+            print(f"Auth Request Failed: {e}")
             return None
 
     async def connect(self):
         try:
-            auth_ws_url = self.get_authorized_ws_url()
-            if not auth_ws_url:
-                print("❌ Failed to get authorized URL")
+            if not TOKEN:
+                print("UPSTOX_ACCESS_TOKEN .env me nahi mila")
                 return False
 
-            print("🔗 Authorized URL Mili: ", auth_ws_url[:60], "...")
-            self.websocket = await websockets.connect(auth_ws_url)
-            print("✅ Successfully Connected to Upstox!")
+            auth_ws_url = self.get_authorized_ws_url()
+            if not auth_ws_url:
+                print("Failed to get authorized URL")
+                return False
+
+            print("Authorized URL Mili:", auth_ws_url[:60], "...")
+            self.websocket = await websockets.connect(
+                auth_ws_url,
+                max_size=None,
+                ping_interval=20,
+                ping_timeout=20,
+                open_timeout=30,
+            )
+            print("Successfully Connected to Upstox!")
             return True
         except Exception as e:
-            print(f"❌ Connection Failed: {e}")
+            print(f"Connection Failed: {e}")
             return False
 
     async def subscribe(self, instrument_keys):
-        """Dono Indices aur Option Strikes ko subscribe karne ke liye"""
         subscription_payload = {
-            "guid": "request1",
+            "guid": "option-chain-1",
             "method": "sub",
             "data": {
                 "instrumentKeys": instrument_keys,
-                "mode": "full" # Professional chain ke liye full mode (OI + Volume)
-            }
+                "mode": "full",
+            },
         }
-        await self.websocket.send(json.dumps(subscription_payload).encode('utf-8'))
-        print(f"🚀 Sent subscription request for {len(instrument_keys)} instruments!")
+
+        await self.websocket.send(json.dumps(subscription_payload).encode("utf-8"))
+        print(f"Sent subscription request for {len(instrument_keys)} instruments!")
 
     async def fetch_live_data(self):
-        print("📡 Waiting for live data feed...")
+        global option_chain_data
+
+        print("Waiting for live data feed...")
+
         while True:
             try:
                 message = await self.websocket.recv()
-                feed = pb2.MarketDataFeed()
+
+                feed = pb2.FeedResponse()
                 feed.ParseFromString(message)
-                data_dict = MessageToDict(feed)
-                
-                if data_dict:
-                    # Sirf testing ke liye terminal par prices dikhane ke liye
-                    for key, val in data_dict.get("feeds", {}).items():
-                        # LTP dhoondna
-                        ltp = val.get('ff', {}).get('marketFF', {}).get('ltpc', {}).get('ltp', '0')
-                        print(f"📈 LIVE: {key} -> Price: {ltp}")
-                else:
-                    print("⚠️ Market is Closed or No Movement.")
-                
+                data_dict = MessageToDict(feed, preserving_proto_field_name=False)
+
+                if data_dict.get("type") == "market_info":
+                    print("Market status:", data_dict.get("marketInfo", {}))
+                    continue
+
+                feeds = data_dict.get("feeds", {})
+                if not feeds:
+                    print("No feed yet. Waiting...")
+                    continue
+
+                option_chain_data = data_dict
+
+                for key, val in feeds.items():
+                    full_feed = val.get("fullFeed", {})
+                    market_ff = full_feed.get("marketFF", {})
+                    index_ff = full_feed.get("indexFF", {})
+                    ltpc = (
+                        market_ff.get("ltpc")
+                        or index_ff.get("ltpc")
+                        or val.get("ltpc")
+                        or {}
+                    )
+
+                    ltp = ltpc.get("ltp", "0")
+                    print(f"LIVE: {key} -> Price: {ltp}")
+
             except Exception as e:
-                print(f"❌ Data Fetch Error: {e}")
+                print(f"Data Fetch Error: {e}")
                 break
 
-if __name__ == "__main__":
+
+def get_last_price(symbol):
+    url = f"https://api.upstox.com/v2/market-quote/quotes?symbol={symbol}"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {TOKEN}",
+    }
+
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            print(f"LTP Error for {symbol}:", response.status_code, response.text)
+            return None
+
+        data = response.json().get("data", {})
+        if not data:
+            print(f"LTP empty for {symbol}")
+            return None
+
+        first_value = next(iter(data.values()))
+        return float(first_value.get("last_price"))
+    except Exception as e:
+        print(f"LTP fetch failed for {symbol}: {e}")
+        return None
+
+
+def round_to_step(price, step):
+    return round(price / step) * step
+
+
+def select_atm_strikes(df, index_name, spot_price, step, strikes_each_side=50):
+    if spot_price is None:
+        print(f"{index_name} spot nahi mila, fallback first strikes use honge.")
+        return df.head(strikes_each_side * 4)
+
+    atm = round_to_step(spot_price, step)
+    low = atm - (strikes_each_side * step)
+    high = atm + (strikes_each_side * step)
+
+    selected = df[
+        (df["strike"] >= low)
+        & (df["strike"] <= high)
+    ].copy()
+
+    selected = selected.sort_values(by=["strike", "option_type"])
+
+    print(f"{index_name} spot: {spot_price}")
+    print(f"{index_name} ATM strike: {atm}")
+    print(f"{index_name} selected range: {low} - {high}")
+    print(f"{index_name} selected contracts: {len(selected)}")
+
+    return selected
+
+
+@app.get("/option-chain")
+def get_chain():
+    return {
+        "feeds": option_chain_data.get("feeds", {}),
+        "instruments": instrument_meta,
+    }
+
+
+def start_backend():
     fetcher = UpstoxDataFetcher()
+
     async def main():
         if await fetcher.connect():
-            # 1. Base Indices (Nifty aur Bank Nifty)
             all_keys = ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"]
-            
-            # 2. CSV se Option Strikes load karna
+
             try:
                 if os.path.exists("current_strikes.csv"):
                     df = pd.read_csv("current_strikes.csv")
-                    # Hum 30-40 strikes subscribe karte hain (Top 20 CE + 20 PE)
-                    option_keys = df['instrument_key'].tolist()[:40]
+                    df["strike"] = pd.to_numeric(df["strike"], errors="coerce")
+                    df = df.dropna(subset=["strike", "instrument_key", "tradingsymbol"])
+
+                    symbols = df["tradingsymbol"].astype(str)
+
+                    nifty_all = df[
+                        symbols.str.startswith("NIFTY")
+                        & ~symbols.str.startswith("BANKNIFTY")
+                        & ~symbols.str.startswith("FINNIFTY")
+                        & ~symbols.str.startswith("MIDCPNIFTY")
+                    ].copy()
+
+                    banknifty_all = df[
+                        symbols.str.startswith("BANKNIFTY")
+                    ].copy()
+
+                    nifty_spot = get_last_price("NSE_INDEX|Nifty 50")
+                    banknifty_spot = get_last_price("NSE_INDEX|Nifty Bank")
+
+                    nifty_df = select_atm_strikes(
+                        nifty_all,
+                        "NIFTY",
+                        nifty_spot,
+                        50,
+                        strikes_each_side=50,
+                    )
+
+                    banknifty_df = select_atm_strikes(
+                        banknifty_all,
+                        "BANKNIFTY",
+                        banknifty_spot,
+                        100,
+                        strikes_each_side=50,
+                    )
+
+                    selected_df = pd.concat([nifty_df, banknifty_df])
+
+                    instrument_meta.clear()
+
+                    for _, row in selected_df.iterrows():
+                        key = str(row["instrument_key"])
+                        instrument_meta[key] = {
+                            "tradingsymbol": str(row.get("tradingsymbol", "")),
+                            "name": str(row.get("name", "")),
+                            "strike": float(row.get("strike", 0)),
+                            "option_type": str(row.get("option_type", "")),
+                        }
+
+                    option_keys = selected_df["instrument_key"].dropna().astype(str).tolist()
                     all_keys.extend(option_keys)
-                    print(f"📂 CSV se {len(option_keys)} strikes uthayi gayi hain.")
+
+                    print(f"NIFTY strikes: {len(nifty_df)}")
+                    print(f"BANKNIFTY strikes: {len(banknifty_df)}")
+                    print(f"CSV se total {len(option_keys)} strikes uthayi gayi hain.")
                 else:
-                    print("⚠️ current_strikes.csv nahi mili! Check 'get_strikes.py'.")
+                    print("current_strikes.csv nahi mili. Pehle python get_strikes.py run karo.")
             except Exception as e:
-                print(f"⚠️ CSV Error: {e}")
+                print(f"CSV Error: {e}")
 
             await fetcher.subscribe(all_keys)
             await fetcher.fetch_live_data()
-    
+
     asyncio.run(main())
+
+
+threading.Thread(target=start_backend, daemon=True).start()

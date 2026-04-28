@@ -46,7 +46,9 @@ class UpstoxDataFetcher:
         print("Waiting for live data feed...")
         while True:
             try:
+                print("🔥 Live loop chal raha hai...")   # 👈 YE LINE ADD KAR
                 message = await self.websocket.recv()
+                print("RAW DATA:", message)
                 
                 # Protobuf decoding logic
                 feed = pb2.MarketDataFeed()
