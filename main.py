@@ -183,6 +183,16 @@ def get_chain():
     }
 
 
+@app.get("/debug")
+def debug():
+    return {
+        "token_present": bool(TOKEN),
+        "current_strikes_exists": os.path.exists("current_strikes.csv"),
+        "instrument_count": len(instrument_meta),
+        "feed_count": len(option_chain_data.get("feeds", {})),
+    }
+
+
 def start_backend():
     fetcher = UpstoxDataFetcher()
 
