@@ -268,4 +268,7 @@ def start_backend():
     asyncio.run(main())
 
 
-threading.Thread(target=start_backend, daemon=True).start()
+@app.on_event("startup")
+def on_startup():
+    print("Starting Upstox background worker...")
+    threading.Thread(target=start_backend, daemon=True).start()
