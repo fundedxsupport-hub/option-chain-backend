@@ -14,6 +14,10 @@ from google.protobuf.json_format import MessageToDict
 
 app = FastAPI()
 
+@app.get("/")
+def home():
+    return {"status": "running"}
+    
 option_chain_data = {
     "feeds": {},
     "type": None,
@@ -102,7 +106,8 @@ class UpstoxDataFetcher:
 
         while True:
             try:
-                message = await self.websocket.recv()
+                # 🔥 FIX: timeout add
+                message = await asyncio.wait_for(self.websocket.recv(), timeout=30)
 
                 feed = pb2.FeedResponse()
                 feed.ParseFromString(message)
@@ -139,6 +144,15 @@ class UpstoxDataFetcher:
 
                     ltp = ltpc.get("ltp", "0")
                     print(f"LIVE: {key} -> Price: {ltp}")
+
+            except asyncio.TimeoutError:
+                # 🔥 FIX: ping keep alive
+                print("Ping keep-alive...")
+                try:
+                    await self.websocket.ping()
+                except Exception as e:
+                    print("Ping failed:", e)
+                    break
 
             except Exception as e:
                 print(f"Data Fetch Error: {e}")
@@ -213,79 +227,83 @@ def start_backend():
     fetcher = UpstoxDataFetcher()
 
     async def main():
-        if await fetcher.connect():
-            all_keys = ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"]
+        while True:
+            if await fetcher.connect():
+                all_keys = ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"]
 
-            try:
-                csv_path = BASE_DIR / "current_strikes.csv"
+                try:
+                    csv_path = BASE_DIR / "current_strikes.csv"
 
-                if csv_path.exists():
-                    df = pd.read_csv(csv_path)
-                    df["strike"] = pd.to_numeric(df["strike"], errors="coerce")
-                    df = df.dropna(
-                        subset=["strike", "instrument_key", "tradingsymbol"]
-                    )
+                    if csv_path.exists():
+                        df = pd.read_csv(csv_path)
+                        df["strike"] = pd.to_numeric(df["strike"], errors="coerce")
+                        df = df.dropna(
+                            subset=["strike", "instrument_key", "tradingsymbol"]
+                        )
 
-                    symbols = df["tradingsymbol"].astype(str)
+                        symbols = df["tradingsymbol"].astype(str)
 
-                    nifty_all = df[
-                        symbols.str.startswith("NIFTY")
-                        & ~symbols.str.startswith("BANKNIFTY")
-                        & ~symbols.str.startswith("FINNIFTY")
-                        & ~symbols.str.startswith("MIDCPNIFTY")
-                    ].copy()
+                        nifty_all = df[
+                            symbols.str.startswith("NIFTY")
+                            & ~symbols.str.startswith("BANKNIFTY")
+                            & ~symbols.str.startswith("FINNIFTY")
+                            & ~symbols.str.startswith("MIDCPNIFTY")
+                        ].copy()
 
-                    banknifty_all = df[
-                        symbols.str.startswith("BANKNIFTY")
-                    ].copy()
+                        banknifty_all = df[
+                            symbols.str.startswith("BANKNIFTY")
+                        ].copy()
 
-                    nifty_spot = get_last_price("NSE_INDEX|Nifty 50")
-                    banknifty_spot = get_last_price("NSE_INDEX|Nifty Bank")
+                        nifty_spot = get_last_price("NSE_INDEX|Nifty 50")
+                        banknifty_spot = get_last_price("NSE_INDEX|Nifty Bank")
 
-                    nifty_df = select_atm_strikes(
-                        nifty_all,
-                        "NIFTY",
-                        nifty_spot,
-                        50,
-                        strikes_each_side=50,
-                    )
+                        nifty_df = select_atm_strikes(
+                            nifty_all,
+                            "NIFTY",
+                            nifty_spot,
+                            50,
+                            strikes_each_side=50,
+                        )
 
-                    banknifty_df = select_atm_strikes(
-                        banknifty_all,
-                        "BANKNIFTY",
-                        banknifty_spot,
-                        100,
-                        strikes_each_side=50,
-                    )
+                        banknifty_df = select_atm_strikes(
+                            banknifty_all,
+                            "BANKNIFTY",
+                            banknifty_spot,
+                            100,
+                            strikes_each_side=50,
+                        )
 
-                    selected_df = pd.concat([nifty_df, banknifty_df])
+                        selected_df = pd.concat([nifty_df, banknifty_df])
 
-                    instrument_meta.clear()
+                        instrument_meta.clear()
 
-                    for _, row in selected_df.iterrows():
-                        key = str(row["instrument_key"])
-                        instrument_meta[key] = {
-                            "tradingsymbol": str(row.get("tradingsymbol", "")),
-                            "name": str(row.get("name", "")),
-                            "strike": float(row.get("strike", 0)),
-                            "option_type": str(row.get("option_type", "")),
-                        }
+                        for _, row in selected_df.iterrows():
+                            key = str(row["instrument_key"])
+                            instrument_meta[key] = {
+                                "tradingsymbol": str(row.get("tradingsymbol", "")),
+                                "name": str(row.get("name", "")),
+                                "strike": float(row.get("strike", 0)),
+                                "option_type": str(row.get("option_type", "")),
+                            }
 
-                    option_keys = (
-                        selected_df["instrument_key"].dropna().astype(str).tolist()
-                    )
-                    all_keys.extend(option_keys)
+                        option_keys = (
+                            selected_df["instrument_key"].dropna().astype(str).tolist()
+                        )
+                        all_keys.extend(option_keys)
 
-                    print(f"NIFTY strikes: {len(nifty_df)}")
-                    print(f"BANKNIFTY strikes: {len(banknifty_df)}")
-                    print(f"CSV se total {len(option_keys)} strikes uthayi gayi hain.")
-                else:
-                    print("current_strikes.csv nahi mili. Pehle python get_strikes.py run karo.")
-            except Exception as e:
-                print(f"CSV Error: {e}")
+                        print(f"NIFTY strikes: {len(nifty_df)}")
+                        print(f"BANKNIFTY strikes: {len(banknifty_df)}")
+                        print(f"CSV se total {len(option_keys)} strikes uthayi gayi hain.")
+                    else:
+                        print("current_strikes.csv nahi mili. Pehle python get_strikes.py run karo.")
+                except Exception as e:
+                    print(f"CSV Error: {e}")
 
-            await fetcher.subscribe(all_keys)
-            await fetcher.fetch_live_data()
+                await fetcher.subscribe(all_keys)
+                await fetcher.fetch_live_data()
+
+            print("Reconnect ho raha hai 3 sec me...")
+            await asyncio.sleep(3)
 
     asyncio.run(main())
 
