@@ -2,19 +2,29 @@ import os
 import asyncio
 import websockets
 import json
-import MarketDataFeed_pb2 as pb2
-from google.protobuf.json_format import MessageToDict
-from dotenv import load_dotenv
-import requests
-import pandas as pd
-from fastapi import FastAPI
 import threading
+from pathlib import Path
+
+import MarketDataFeed_pb2 as pb2
+import pandas as pd
+import requests
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from google.protobuf.json_format import MessageToDict
 
 app = FastAPI()
-option_chain_data = {}
+
+option_chain_data = {
+    "feeds": {},
+    "type": None,
+    "currentTs": None,
+}
+
 instrument_meta = {}
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+
+load_dotenv(BASE_DIR / ".env")
 TOKEN = (os.getenv("UPSTOX_ACCESS_TOKEN") or os.getenv("ACCESS_TOKEN") or "").strip()
 
 
@@ -30,7 +40,7 @@ class UpstoxDataFetcher:
         }
 
         try:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=15)
             if response.status_code != 200:
                 print("Auth URL Error:", response.status_code, response.text)
                 return None
@@ -84,6 +94,12 @@ class UpstoxDataFetcher:
 
         print("Waiting for live data feed...")
 
+        option_chain_data = {
+            "feeds": {},
+            "type": None,
+            "currentTs": None,
+        }
+
         while True:
             try:
                 message = await self.websocket.recv()
@@ -101,7 +117,14 @@ class UpstoxDataFetcher:
                     print("No feed yet. Waiting...")
                     continue
 
-                option_chain_data = data_dict
+                option_chain_data.setdefault("feeds", {})
+                option_chain_data["feeds"].update(feeds)
+                option_chain_data["type"] = data_dict.get("type")
+                option_chain_data["currentTs"] = data_dict.get("currentTs")
+
+                expected_count = len(instrument_meta) + 2
+                cached_count = len(option_chain_data["feeds"])
+                print(f"Cached feeds: {cached_count} / {expected_count}")
 
                 for key, val in feeds.items():
                     full_feed = val.get("fullFeed", {})
@@ -130,7 +153,7 @@ def get_last_price(symbol):
     }
 
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=15)
         if response.status_code != 200:
             print(f"LTP Error for {symbol}:", response.status_code, response.text)
             return None
@@ -180,16 +203,9 @@ def get_chain():
     return {
         "feeds": option_chain_data.get("feeds", {}),
         "instruments": instrument_meta,
-    }
-
-
-@app.get("/debug")
-def debug():
-    return {
-        "token_present": bool(TOKEN),
-        "current_strikes_exists": os.path.exists("current_strikes.csv"),
+        "cached_feed_count": len(option_chain_data.get("feeds", {})),
         "instrument_count": len(instrument_meta),
-        "feed_count": len(option_chain_data.get("feeds", {})),
+        "currentTs": option_chain_data.get("currentTs"),
     }
 
 
@@ -201,10 +217,14 @@ def start_backend():
             all_keys = ["NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"]
 
             try:
-                if os.path.exists("current_strikes.csv"):
-                    df = pd.read_csv("current_strikes.csv")
+                csv_path = BASE_DIR / "current_strikes.csv"
+
+                if csv_path.exists():
+                    df = pd.read_csv(csv_path)
                     df["strike"] = pd.to_numeric(df["strike"], errors="coerce")
-                    df = df.dropna(subset=["strike", "instrument_key", "tradingsymbol"])
+                    df = df.dropna(
+                        subset=["strike", "instrument_key", "tradingsymbol"]
+                    )
 
                     symbols = df["tradingsymbol"].astype(str)
 
@@ -251,7 +271,9 @@ def start_backend():
                             "option_type": str(row.get("option_type", "")),
                         }
 
-                    option_keys = selected_df["instrument_key"].dropna().astype(str).tolist()
+                    option_keys = (
+                        selected_df["instrument_key"].dropna().astype(str).tolist()
+                    )
                     all_keys.extend(option_keys)
 
                     print(f"NIFTY strikes: {len(nifty_df)}")
@@ -268,7 +290,4 @@ def start_backend():
     asyncio.run(main())
 
 
-@app.on_event("startup")
-def on_startup():
-    print("Starting Upstox background worker...")
-    threading.Thread(target=start_backend, daemon=True).start()
+threading.Thread(target=start_backend, daemon=True).start()
