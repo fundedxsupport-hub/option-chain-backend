@@ -106,7 +106,6 @@ class UpstoxDataFetcher:
 
         while True:
             try:
-                # 🔥 FIX: timeout add
                 message = await asyncio.wait_for(self.websocket.recv(), timeout=30)
 
                 feed = pb2.FeedResponse()
@@ -146,7 +145,6 @@ class UpstoxDataFetcher:
                     print(f"LIVE: {key} -> Price: {ltp}")
 
             except asyncio.TimeoutError:
-                # 🔥 FIX: ping keep alive
                 print("Ping keep-alive...")
                 try:
                     await self.websocket.ping()
@@ -284,6 +282,7 @@ def start_backend():
                                 "name": str(row.get("name", "")),
                                 "strike": float(row.get("strike", 0)),
                                 "option_type": str(row.get("option_type", "")),
+                                "expiry": str(row.get("expiry", "")),
                             }
 
                         option_keys = (
