@@ -13,6 +13,8 @@ from dotenv import dotenv_values
 from fastapi import FastAPI, Query
 from google.protobuf.json_format import MessageToDict
 
+from get_strikes import fetch_and_filter_strikes
+
 app = FastAPI()
 
 @app.get("/")
@@ -93,6 +95,15 @@ def print_token_debug(source, token):
 
 TOKEN_SOURCE, TOKEN = get_token_info()
 print_token_debug(TOKEN_SOURCE, TOKEN)
+
+
+def refresh_strike_csv_on_startup():
+    try:
+        print("Startup strike refresh shuru...")
+        fetch_and_filter_strikes()
+        print("Startup strike refresh complete.")
+    except Exception as e:
+        print(f"Startup strike refresh failed: {e}")
 
 
 class UpstoxDataFetcher:
@@ -370,6 +381,8 @@ def get_expiries():
 
 
 def start_backend():
+    refresh_strike_csv_on_startup()
+
     fetcher = UpstoxDataFetcher()
 
     async def main():
