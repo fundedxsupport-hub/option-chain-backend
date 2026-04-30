@@ -5,6 +5,7 @@ import json
 import threading
 import base64
 from pathlib import Path
+from urllib.parse import quote
 
 import MarketDataFeed_pb2 as pb2
 import pandas as pd
@@ -256,6 +257,21 @@ def get_last_price(symbol):
         return None
 
 
+def normalize_candle(candle):
+    if not isinstance(candle, list) or len(candle) < 5:
+        return None
+
+    return {
+        "time": candle[0],
+        "open": safe_float(candle[1]),
+        "high": safe_float(candle[2]),
+        "low": safe_float(candle[3]),
+        "close": safe_float(candle[4]),
+        "volume": safe_float(candle[5]) if len(candle) > 5 else 0,
+        "oi": safe_float(candle[6]) if len(candle) > 6 else 0,
+    }
+
+
 def round_to_step(price, step):
     return round(price / step) * step
 
@@ -378,6 +394,58 @@ def get_expiries():
         "expiries": available_expiries,
         "subscribed_expiries": subscribed_expiries,
     }
+
+
+@app.get("/candles")
+def get_candles(
+    instrument_key: str = Query(...),
+    unit: str = Query(default="minutes"),
+    interval: int = Query(default=1),
+):
+    encoded_key = quote(instrument_key, safe="")
+    url = (
+        "https://api.upstox.com/v3/historical-candle/intraday/"
+        f"{encoded_key}/{unit}/{interval}"
+    )
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {TOKEN}",
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=20)
+        if response.status_code != 200:
+            return {
+                "status": "error",
+                "message": response.text,
+                "status_code": response.status_code,
+                "instrument_key": instrument_key,
+                "candles": [],
+            }
+
+        data = response.json()
+        raw_candles = data.get("data", {}).get("candles", [])
+        candles = [
+            normalized
+            for normalized in (normalize_candle(candle) for candle in raw_candles)
+            if normalized is not None
+        ]
+        candles.reverse()
+
+        return {
+            "status": "success",
+            "instrument_key": instrument_key,
+            "unit": unit,
+            "interval": interval,
+            "candles": candles,
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "instrument_key": instrument_key,
+            "candles": [],
+        }
 
 
 def start_backend():
