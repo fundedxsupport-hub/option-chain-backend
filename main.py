@@ -10,7 +10,7 @@ import MarketDataFeed_pb2 as pb2
 import pandas as pd
 import requests
 from dotenv import dotenv_values
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from google.protobuf.json_format import MessageToDict
 
 app = FastAPI()
@@ -26,8 +26,19 @@ option_chain_data = {
 }
 
 instrument_meta = {}
+all_instrument_meta = {}
+available_expiries = {
+    "NIFTY": [],
+    "BANKNIFTY": [],
+}
+subscribed_expiries = {
+    "NIFTY": [],
+    "BANKNIFTY": [],
+}
 
 BASE_DIR = Path(__file__).resolve().parent
+ACTIVE_EXPIRY_COUNT = 2
+STRIKES_EACH_SIDE = 20
 
 DOTENV_VALUES = dotenv_values(BASE_DIR / ".env")
 
@@ -238,17 +249,50 @@ def round_to_step(price, step):
     return round(price / step) * step
 
 
-def select_atm_strikes(df, index_name, spot_price, step, strikes_each_side=50):
+def safe_float(value, default=0.0):
+    try:
+        number = float(value)
+        if pd.isna(number):
+            return default
+        return number
+    except Exception:
+        return default
+
+
+def get_expiry_list(df):
+    if "expiry" not in df.columns:
+        return []
+
+    expiries = pd.to_datetime(df["expiry"], errors="coerce").dropna()
+    return [
+        pd.Timestamp(expiry).date().isoformat()
+        for expiry in sorted(expiries.unique())
+    ]
+
+
+def select_atm_strikes(
+    df,
+    index_name,
+    spot_price,
+    step,
+    strikes_each_side=50,
+    expiry_count=ACTIVE_EXPIRY_COUNT,
+):
     if spot_price is None:
         print(f"{index_name} spot nahi mila, fallback first strikes use honge.")
         return df.head(strikes_each_side * 4)
 
     if "expiry" in df.columns:
         expiries = pd.to_datetime(df["expiry"], errors="coerce")
-        nearest_expiry = expiries.dropna().min()
-        if pd.notna(nearest_expiry):
-            df = df[expiries == nearest_expiry].copy()
-            print(f"{index_name} nearest expiry: {nearest_expiry.date()}")
+        nearest_expiries = sorted(expiries.dropna().unique())[:expiry_count]
+        if nearest_expiries:
+            expiry_dates = [
+                pd.Timestamp(expiry).date().isoformat()
+                for expiry in nearest_expiries
+            ]
+            df = df[expiries.isin(nearest_expiries)].copy()
+            subscribed_expiries[index_name] = expiry_dates
+            print(f"{index_name} subscribed expiries: {expiry_dates}")
 
     atm = round_to_step(spot_price, step)
     low = atm - (strikes_each_side * step)
@@ -270,13 +314,58 @@ def select_atm_strikes(df, index_name, spot_price, step, strikes_each_side=50):
 
 
 @app.get("/option-chain")
-def get_chain():
+def get_chain(
+    symbol: str | None = Query(default=None),
+    expiry: str | None = Query(default=None),
+):
+    filtered_meta = all_instrument_meta or instrument_meta
+
+    if symbol:
+        symbol_upper = symbol.upper()
+        filtered_meta = {
+            key: value
+            for key, value in filtered_meta.items()
+            if value.get("name", "").upper() == symbol_upper
+        }
+
+    if expiry:
+        filtered_meta = {
+            key: value
+            for key, value in filtered_meta.items()
+            if value.get("expiry") == expiry
+        }
+
+    allowed_keys = set(filtered_meta.keys()) | {
+        "NSE_INDEX|Nifty 50",
+        "NSE_INDEX|Nifty Bank",
+    }
+    filtered_feeds = {
+        key: value
+        for key, value in option_chain_data.get("feeds", {}).items()
+        if key in allowed_keys
+    }
+
     return {
-        "feeds": option_chain_data.get("feeds", {}),
-        "instruments": instrument_meta,
-        "cached_feed_count": len(option_chain_data.get("feeds", {})),
-        "instrument_count": len(instrument_meta),
+        "feeds": filtered_feeds,
+        "instruments": filtered_meta,
+        "expiries": available_expiries,
+        "subscribed_expiries": subscribed_expiries,
+        "selected_symbol": symbol,
+        "selected_expiry": expiry,
+        "cached_feed_count": len(filtered_feeds),
+        "total_cached_feed_count": len(option_chain_data.get("feeds", {})),
+        "instrument_count": len(filtered_meta),
+        "subscribed_instrument_count": len(instrument_meta),
+        "total_instrument_count": len(all_instrument_meta or instrument_meta),
         "currentTs": option_chain_data.get("currentTs"),
+    }
+
+
+@app.get("/expiries")
+def get_expiries():
+    return {
+        "expiries": available_expiries,
+        "subscribed_expiries": subscribed_expiries,
     }
 
 
@@ -311,6 +400,9 @@ def start_backend():
                             symbols.str.startswith("BANKNIFTY")
                         ].copy()
 
+                        available_expiries["NIFTY"] = get_expiry_list(nifty_all)
+                        available_expiries["BANKNIFTY"] = get_expiry_list(banknifty_all)
+
                         nifty_spot = get_last_price("NSE_INDEX|Nifty 50")
                         banknifty_spot = get_last_price("NSE_INDEX|Nifty Bank")
 
@@ -319,7 +411,8 @@ def start_backend():
                             "NIFTY",
                             nifty_spot,
                             50,
-                            strikes_each_side=20,
+                            strikes_each_side=STRIKES_EACH_SIDE,
+                            expiry_count=ACTIVE_EXPIRY_COUNT,
                         )
 
                         banknifty_df = select_atm_strikes(
@@ -327,12 +420,30 @@ def start_backend():
                             "BANKNIFTY",
                             banknifty_spot,
                             100,
-                            strikes_each_side=20,
+                            strikes_each_side=STRIKES_EACH_SIDE,
+                            expiry_count=ACTIVE_EXPIRY_COUNT,
                         )
 
                         selected_df = pd.concat([nifty_df, banknifty_df])
 
                         instrument_meta.clear()
+                        all_instrument_meta.clear()
+
+                        all_expiry_df = pd.concat(
+                            [nifty_all, banknifty_all],
+                            ignore_index=True,
+                        )
+
+                        for _, row in all_expiry_df.iterrows():
+                            key = str(row["instrument_key"])
+                            all_instrument_meta[key] = {
+                                "tradingsymbol": str(row.get("tradingsymbol", "")),
+                                "name": str(row.get("name", "")),
+                                "expiry": str(row.get("expiry", "")),
+                                "strike": safe_float(row.get("strike", 0)),
+                                "last_price": safe_float(row.get("last_price", 0)),
+                                "option_type": str(row.get("option_type", "")),
+                            }
 
                         for _, row in selected_df.iterrows():
                             key = str(row["instrument_key"])
@@ -340,7 +451,8 @@ def start_backend():
                                 "tradingsymbol": str(row.get("tradingsymbol", "")),
                                 "name": str(row.get("name", "")),
                                 "expiry": str(row.get("expiry", "")),
-                                "strike": float(row.get("strike", 0)),
+                                "strike": safe_float(row.get("strike", 0)),
+                                "last_price": safe_float(row.get("last_price", 0)),
                                 "option_type": str(row.get("option_type", "")),
                             }
 
