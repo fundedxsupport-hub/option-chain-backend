@@ -243,6 +243,13 @@ def select_atm_strikes(df, index_name, spot_price, step, strikes_each_side=50):
         print(f"{index_name} spot nahi mila, fallback first strikes use honge.")
         return df.head(strikes_each_side * 4)
 
+    if "expiry" in df.columns:
+        expiries = pd.to_datetime(df["expiry"], errors="coerce")
+        nearest_expiry = expiries.dropna().min()
+        if pd.notna(nearest_expiry):
+            df = df[expiries == nearest_expiry].copy()
+            print(f"{index_name} nearest expiry: {nearest_expiry.date()}")
+
     atm = round_to_step(spot_price, step)
     low = atm - (strikes_each_side * step)
     high = atm + (strikes_each_side * step)
@@ -312,7 +319,7 @@ def start_backend():
                             "NIFTY",
                             nifty_spot,
                             50,
-                            strikes_each_side=50,
+                            strikes_each_side=20,
                         )
 
                         banknifty_df = select_atm_strikes(
@@ -320,7 +327,7 @@ def start_backend():
                             "BANKNIFTY",
                             banknifty_spot,
                             100,
-                            strikes_each_side=50,
+                            strikes_each_side=20,
                         )
 
                         selected_df = pd.concat([nifty_df, banknifty_df])
@@ -332,6 +339,7 @@ def start_backend():
                             instrument_meta[key] = {
                                 "tradingsymbol": str(row.get("tradingsymbol", "")),
                                 "name": str(row.get("name", "")),
+                                "expiry": str(row.get("expiry", "")),
                                 "strike": float(row.get("strike", 0)),
                                 "option_type": str(row.get("option_type", "")),
                             }
