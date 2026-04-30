@@ -6,6 +6,7 @@ import threading
 import base64
 from pathlib import Path
 from urllib.parse import quote
+from datetime import date, datetime, timedelta
 
 import MarketDataFeed_pb2 as pb2
 import pandas as pd
@@ -27,6 +28,8 @@ option_chain_data = {
     "type": None,
     "currentTs": None,
 }
+
+live_candles = {}
 
 instrument_meta = {}
 all_instrument_meta = {}
@@ -674,5 +677,6 @@ def start_backend():
 
 
 threading.Thread(target=start_backend, daemon=True).start()
+
 
 
