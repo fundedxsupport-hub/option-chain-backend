@@ -257,6 +257,77 @@ def get_last_price(symbol):
         return None
 
 
+def parse_feed_timestamp(value):
+    try:
+        if value is None:
+            return datetime.now()
+
+        if isinstance(value, str) and value.isdigit():
+            value = int(value)
+
+        if isinstance(value, (int, float)):
+            # Upstox currentTs is usually epoch milliseconds.
+            if value > 100000000000:
+                return datetime.fromtimestamp(value / 1000)
+            return datetime.fromtimestamp(value)
+
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=None)
+    except Exception:
+        return datetime.now()
+
+
+def candle_bucket_time(ts, interval):
+    minute = (ts.minute // interval) * interval
+    return ts.replace(minute=minute, second=0, microsecond=0)
+
+
+def update_live_candle(instrument_key, feed, current_ts):
+    if not instrument_key or not isinstance(feed, dict):
+        return
+
+    full_feed = feed.get("fullFeed", {})
+    market_ff = full_feed.get("marketFF", {})
+    index_ff = full_feed.get("indexFF", {})
+    ff = market_ff or index_ff
+    ltpc = ff.get("ltpc") or feed.get("ltpc") or {}
+
+    ltp = safe_float(ltpc.get("ltp"), None)
+    if ltp is None or ltp <= 0:
+        return
+
+    volume = safe_float(ff.get("vtt", 0))
+    oi = safe_float(ff.get("oi", 0))
+    ts = parse_feed_timestamp(current_ts)
+
+    for interval in (1, 3, 5, 15):
+        bucket = candle_bucket_time(ts, interval)
+        time_key = bucket.isoformat()
+        instrument_candles = live_candles.setdefault(instrument_key, {})
+        interval_candles = instrument_candles.setdefault(interval, {})
+        candle = interval_candles.get(time_key)
+
+        if candle is None:
+            interval_candles[time_key] = {
+                "time": time_key,
+                "open": ltp,
+                "high": ltp,
+                "low": ltp,
+                "close": ltp,
+                "volume": volume,
+                "oi": oi,
+            }
+        else:
+            candle["high"] = max(candle["high"], ltp)
+            candle["low"] = min(candle["low"], ltp)
+            candle["close"] = ltp
+            candle["volume"] = max(candle.get("volume", 0), volume)
+            candle["oi"] = oi or candle.get("oi", 0)
+
+        if len(interval_candles) > 1500:
+            for old_key in sorted(interval_candles.keys())[:-1200]:
+                interval_candles.pop(old_key, None)
+
 def normalize_candle(candle):
     if not isinstance(candle, list) or len(candle) < 5:
         return None
@@ -401,9 +472,16 @@ def get_candles(
     instrument_key: str = Query(...),
     unit: str = Query(default="minutes"),
     interval: int = Query(default=1),
+    history_days: int = Query(default=7),
 ):
     encoded_key = quote(instrument_key, safe="")
-    url = (
+    today = date.today()
+    from_day = today - timedelta(days=max(1, min(history_days, 30)))
+    historical_url = (
+        "https://api.upstox.com/v3/historical-candle/"
+        f"{encoded_key}/{unit}/{interval}/{today.isoformat()}/{from_day.isoformat()}"
+    )
+    intraday_url = (
         "https://api.upstox.com/v3/historical-candle/intraday/"
         f"{encoded_key}/{unit}/{interval}"
     )
@@ -412,31 +490,67 @@ def get_candles(
         "Authorization": f"Bearer {TOKEN}",
     }
 
+    raw_candles = []
+    errors = []
+
     try:
-        response = requests.get(url, headers=headers, timeout=20)
-        if response.status_code != 200:
+        historical_response = requests.get(historical_url, headers=headers, timeout=20)
+        if historical_response.status_code == 200:
+            raw_candles.extend(
+                historical_response.json().get("data", {}).get("candles", [])
+            )
+        else:
+            errors.append(
+                {
+                    "source": "historical",
+                    "status_code": historical_response.status_code,
+                    "message": historical_response.text,
+                }
+            )
+
+        intraday_response = requests.get(intraday_url, headers=headers, timeout=20)
+        if intraday_response.status_code == 200:
+            raw_candles.extend(
+                intraday_response.json().get("data", {}).get("candles", [])
+            )
+        else:
+            errors.append(
+                {
+                    "source": "intraday",
+                    "status_code": intraday_response.status_code,
+                    "message": intraday_response.text,
+                }
+            )
+
+        candle_by_time = {}
+        for normalized in (normalize_candle(candle) for candle in raw_candles):
+            if normalized is None:
+                continue
+            candle_by_time[normalized["time"]] = normalized
+
+        for live in live_candles.get(instrument_key, {}).get(interval, {}).values():
+            candle_by_time[live["time"]] = live
+
+        candles = sorted(candle_by_time.values(), key=lambda candle: candle["time"])
+
+        if not candles:
             return {
                 "status": "error",
-                "message": response.text,
-                "status_code": response.status_code,
+                "message": "No candle data returned",
+                "errors": errors,
                 "instrument_key": instrument_key,
                 "candles": [],
             }
-
-        data = response.json()
-        raw_candles = data.get("data", {}).get("candles", [])
-        candles = [
-            normalized
-            for normalized in (normalize_candle(candle) for candle in raw_candles)
-            if normalized is not None
-        ]
-        candles.reverse()
 
         return {
             "status": "success",
             "instrument_key": instrument_key,
             "unit": unit,
             "interval": interval,
+            "history_days": history_days,
+            "source": "historical+intraday+websocket",
+            "live_candle_count": len(live_candles.get(instrument_key, {}).get(interval, {})),
+            "errors": errors,
             "candles": candles,
         }
     except Exception as e:
@@ -560,3 +674,5 @@ def start_backend():
 
 
 threading.Thread(target=start_backend, daemon=True).start()
+
+
