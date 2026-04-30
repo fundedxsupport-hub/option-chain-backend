@@ -12,7 +12,7 @@ import MarketDataFeed_pb2 as pb2
 import pandas as pd
 import requests
 from dotenv import dotenv_values
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from google.protobuf.json_format import MessageToDict
 
 from get_strikes import fetch_and_filter_strikes
@@ -22,6 +22,18 @@ app = FastAPI()
 @app.get("/")
 def home():
     return {"status": "running"}
+
+@app.websocket("/ws/option-chain")
+async def option_chain_ws(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            await websocket.send_json(option_chain_data)
+            await asyncio.sleep(0.5)
+    except WebSocketDisconnect:
+        return
+    except Exception as e:
+        print(f"Client websocket error: {e}")
 
 option_chain_data = {
     "feeds": {},
@@ -677,6 +689,7 @@ def start_backend():
 
 
 threading.Thread(target=start_backend, daemon=True).start()
+
 
 
 
