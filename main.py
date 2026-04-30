@@ -3,12 +3,13 @@ import asyncio
 import websockets
 import json
 import threading
+import base64
 from pathlib import Path
 
 import MarketDataFeed_pb2 as pb2
 import pandas as pd
 import requests
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from fastapi import FastAPI
 from google.protobuf.json_format import MessageToDict
 
@@ -17,7 +18,7 @@ app = FastAPI()
 @app.get("/")
 def home():
     return {"status": "running"}
-    
+
 option_chain_data = {
     "feeds": {},
     "type": None,
@@ -28,8 +29,59 @@ instrument_meta = {}
 
 BASE_DIR = Path(__file__).resolve().parent
 
-load_dotenv(BASE_DIR / ".env")
-TOKEN = (os.getenv("UPSTOX_ACCESS_TOKEN") or os.getenv("ACCESS_TOKEN") or "").strip()
+DOTENV_VALUES = dotenv_values(BASE_DIR / ".env")
+
+
+def clean_token(value):
+    return (value or "").strip().strip('"').strip("'")
+
+
+def get_token_info():
+    # Render/dashboard environment should win. .env is only a local fallback.
+    for name in ("UPSTOX_ACCESS_TOKEN", "ACCESS_TOKEN"):
+        value = clean_token(os.environ.get(name))
+        if value:
+            return f"env:{name}", value
+
+    for name in ("UPSTOX_ACCESS_TOKEN", "ACCESS_TOKEN"):
+        value = clean_token(DOTENV_VALUES.get(name))
+        if value:
+            return f".env:{name}", value
+
+    return "missing", ""
+
+
+def print_token_debug(source, token):
+    if not token:
+        print("Token debug: token missing")
+        return
+
+    expiry = "unknown"
+    try:
+        payload_part = token.split(".")[1]
+        padded_payload = payload_part + "=" * (-len(payload_part) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded_payload))
+        if payload.get("exp"):
+            from datetime import datetime
+
+            expiry = datetime.fromtimestamp(payload["exp"]).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+    except Exception:
+        pass
+
+    print(
+        "Token debug:",
+        f"source={source}",
+        f"length={len(token)}",
+        f"starts={token[:8]}",
+        f"ends={token[-8:]}",
+        f"expiry={expiry}",
+    )
+
+
+TOKEN_SOURCE, TOKEN = get_token_info()
+print_token_debug(TOKEN_SOURCE, TOKEN)
 
 
 class UpstoxDataFetcher:
@@ -58,7 +110,7 @@ class UpstoxDataFetcher:
     async def connect(self):
         try:
             if not TOKEN:
-                print("UPSTOX_ACCESS_TOKEN .env me nahi mila")
+                print("UPSTOX_ACCESS_TOKEN / ACCESS_TOKEN nahi mila")
                 return False
 
             auth_ws_url = self.get_authorized_ws_url()
@@ -106,7 +158,6 @@ class UpstoxDataFetcher:
 
         while True:
             try:
-                # 🔥 FIX: timeout add
                 message = await asyncio.wait_for(self.websocket.recv(), timeout=30)
 
                 feed = pb2.FeedResponse()
@@ -146,7 +197,6 @@ class UpstoxDataFetcher:
                     print(f"LIVE: {key} -> Price: {ltp}")
 
             except asyncio.TimeoutError:
-                # 🔥 FIX: ping keep alive
                 print("Ping keep-alive...")
                 try:
                     await self.websocket.ping()
