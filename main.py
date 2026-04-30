@@ -37,7 +37,7 @@ subscribed_expiries = {
 }
 
 BASE_DIR = Path(__file__).resolve().parent
-ACTIVE_EXPIRY_COUNT = 2
+ACTIVE_EXPIRY_COUNT = 3
 STRIKES_EACH_SIDE = 20
 
 DOTENV_VALUES = dotenv_values(BASE_DIR / ".env")
