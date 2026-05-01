@@ -1,4 +1,4 @@
-﻿import os
+import os
 import asyncio
 import websockets
 import json
@@ -49,7 +49,7 @@ INDEX_CONFIG = {
     "NIFTY": {"name": "NIFTY", "exchange": "NSE_FO", "index_key": "NSE_INDEX|Nifty 50", "step": 50},
     "BANKNIFTY": {"name": "BANKNIFTY", "exchange": "NSE_FO", "index_key": "NSE_INDEX|Nifty Bank", "step": 100},
     "FINNIFTY": {"name": "FINNIFTY", "exchange": "NSE_FO", "index_key": "NSE_INDEX|Nifty Fin Service", "step": 50},
-    "MIDCPNIFTY": {"name": "MIDCPNIFTY", "exchange": "NSE_FO", "index_key": "NSE_INDEX|Nifty Midcap Select", "step": 25},
+    "MIDCPNIFTY": {"name": "MIDCPNIFTY", "exchange": "NSE_FO", "index_key": "NSE_INDEX|NIFTY MID SELECT", "step": 25},
     "SENSEX": {"name": "SENSEX", "exchange": "BSE_FO", "index_key": "BSE_INDEX|SENSEX", "step": 100},
     "BANKEX": {"name": "BANKEX", "exchange": "BSE_FO", "index_key": "BSE_INDEX|BANKEX", "step": 100},
 }
@@ -398,6 +398,16 @@ def get_expiry_list(df):
     ]
 
 
+def fallback_spot_from_strikes(df, step):
+    try:
+        strikes = sorted(pd.Series(df["strike"]).dropna().astype(float).unique())
+        if not strikes:
+            return None
+        return round_to_step(strikes[len(strikes) // 2], step)
+    except Exception:
+        return None
+
+
 def select_atm_strikes(
     df,
     index_name,
@@ -406,32 +416,52 @@ def select_atm_strikes(
     strikes_each_side=50,
     expiry_count=ACTIVE_EXPIRY_COUNT,
 ):
-    if spot_price is None:
-        print(f"{index_name} spot nahi mila, fallback first strikes use honge.")
-        return df.head(strikes_each_side * 4)
+    working_df = df.copy()
 
-    if "expiry" in df.columns:
-        expiries = pd.to_datetime(df["expiry"], errors="coerce")
+    if "expiry" in working_df.columns:
+        expiries = pd.to_datetime(working_df["expiry"], errors="coerce")
         nearest_expiries = sorted(expiries.dropna().unique())[:expiry_count]
         if nearest_expiries:
             expiry_dates = [
                 pd.Timestamp(expiry).date().isoformat()
                 for expiry in nearest_expiries
             ]
-            df = df[expiries.isin(nearest_expiries)].copy()
+            working_df = working_df[expiries.isin(nearest_expiries)].copy()
             subscribed_expiries[index_name] = expiry_dates
             print(f"{index_name} subscribed expiries: {expiry_dates}")
+
+    if working_df.empty:
+        print(f"{index_name} selected expiry data empty.")
+        return working_df
+
+    if spot_price is None:
+        spot_price = fallback_spot_from_strikes(working_df, step)
+        print(f"{index_name} spot nahi mila, strike fallback center use hoga: {spot_price}")
+
+    if spot_price is None:
+        fallback_rows = strikes_each_side * 2 * max(1, expiry_count)
+        print(f"{index_name} fallback first {fallback_rows} rows use honge.")
+        return working_df.head(fallback_rows)
 
     atm = round_to_step(spot_price, step)
     low = atm - (strikes_each_side * step)
     high = atm + (strikes_each_side * step)
 
-    selected = df[
-        (df["strike"] >= low)
-        & (df["strike"] <= high)
+    selected = working_df[
+        (working_df["strike"] >= low)
+        & (working_df["strike"] <= high)
     ].copy()
 
-    selected = selected.sort_values(by=["strike", "option_type"])
+    if selected.empty:
+        strikes = sorted(working_df["strike"].dropna().astype(float).unique())
+        nearest_strikes = sorted(strikes, key=lambda strike: abs(strike - atm))[
+            : (strikes_each_side * 2) + 1
+        ]
+        selected = working_df[working_df["strike"].isin(nearest_strikes)].copy()
+
+    sort_cols = [col for col in ["expiry", "strike", "option_type"] if col in selected.columns]
+    if sort_cols:
+        selected = selected.sort_values(by=sort_cols)
 
     print(f"{index_name} spot: {spot_price}")
     print(f"{index_name} ATM strike: {atm}")
@@ -439,7 +469,6 @@ def select_atm_strikes(
     print(f"{index_name} selected contracts: {len(selected)}")
 
     return selected
-
 
 @app.get("/option-chain")
 def get_chain(
@@ -728,6 +757,7 @@ def start_backend():
 
 
 threading.Thread(target=start_backend, daemon=True).start()
+
 
 
 
