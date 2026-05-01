@@ -4,6 +4,7 @@ import websockets
 import json
 import threading
 import base64
+import ssl
 from pathlib import Path
 from urllib.parse import quote
 from datetime import date, datetime, timedelta
@@ -160,8 +161,12 @@ class UpstoxDataFetcher:
                 return False
 
             print("Authorized URL Mili:", auth_ws_url[:60], "...")
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
             self.websocket = await websockets.connect(
                 auth_ws_url,
+                ssl=ssl_context,
                 max_size=None,
                 ping_interval=20,
                 ping_timeout=20,
@@ -170,7 +175,14 @@ class UpstoxDataFetcher:
             print("Successfully Connected to Upstox!")
             return True
         except Exception as e:
-            print(f"Connection Failed: {e}")
+            message = str(e)
+            print(f"Connection Failed: {message}")
+            if "403" in message:
+                print(
+                    "Upstox websocket 403: access token/feed permission rejected. "
+                    "Generate a fresh Upstox access token, stop any other running backend using the same token, "
+                    "then restart this service."
+                )
             return False
 
     async def subscribe(self, instrument_keys):
@@ -759,6 +771,8 @@ def start_backend():
 
 
 threading.Thread(target=start_backend, daemon=True).start()
+
+
 
 
 
