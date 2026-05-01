@@ -59,7 +59,7 @@ subscribed_expiries = {symbol: [] for symbol in INDEX_CONFIG}
 
 BASE_DIR = Path(__file__).resolve().parent
 ACTIVE_EXPIRY_COUNT = 3
-STRIKES_EACH_SIDE = 20
+STRIKES_EACH_SIDE = 50
 
 DOTENV_VALUES = dotenv_values(BASE_DIR / ".env")
 
@@ -475,7 +475,7 @@ def get_chain(
     symbol: str | None = Query(default=None),
     expiry: str | None = Query(default=None),
 ):
-    filtered_meta = all_instrument_meta or instrument_meta
+    filtered_meta = instrument_meta or all_instrument_meta
 
     if symbol:
         symbol_upper = symbol.upper()
@@ -502,7 +502,8 @@ def get_chain(
     return {
         "feeds": filtered_feeds,
         "instruments": filtered_meta,
-        "expiries": available_expiries,
+        "expiries": subscribed_expiries,
+        "all_expiries": available_expiries,
         "subscribed_expiries": subscribed_expiries,
         "selected_symbol": symbol,
         "selected_expiry": expiry,
@@ -518,7 +519,8 @@ def get_chain(
 @app.get("/expiries")
 def get_expiries():
     return {
-        "expiries": available_expiries,
+        "expiries": subscribed_expiries,
+        "all_expiries": available_expiries,
         "subscribed_expiries": subscribed_expiries,
     }
 
@@ -757,6 +759,8 @@ def start_backend():
 
 
 threading.Thread(target=start_backend, daemon=True).start()
+
+
 
 
 
