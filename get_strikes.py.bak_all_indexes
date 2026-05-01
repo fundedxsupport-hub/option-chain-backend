@@ -1,4 +1,4 @@
-﻿import gzip
+import gzip
 import io
 from pathlib import Path
 
@@ -11,44 +11,19 @@ CSV_PATH = BASE_DIR / "current_strikes.csv"
 
 MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz"
 
-INDEX_FILTERS = {
-    "NIFTY": {"exchange": "NSE_FO", "name": "NIFTY"},
-    "BANKNIFTY": {"exchange": "NSE_FO", "name": "BANKNIFTY"},
-    "FINNIFTY": {"exchange": "NSE_FO", "name": "FINNIFTY"},
-    "MIDCPNIFTY": {"exchange": "NSE_FO", "name": "MIDCPNIFTY"},
-    "SENSEX": {"exchange": "BSE_FO", "name": "SENSEX"},
-    "BANKEX": {"exchange": "BSE_FO", "name": "BANKEX"},
-}
 
-
-def all_expiry_rows(df, index_name, config):
-    part = df[
-        (df["exchange"].astype(str) == config["exchange"])
-        & (df["name"].astype(str).str.upper() == config["name"])
-    ].copy()
+def all_expiry_rows(df, name):
+    part = df[df["name"].astype(str).str.upper() == name].copy()
 
     if part.empty:
-        symbols = df["tradingsymbol"].astype(str).str.upper()
-        starts = symbols.str.startswith(config["name"])
-        if index_name == "NIFTY":
-            starts = (
-                starts
-                & ~symbols.str.startswith("BANKNIFTY")
-                & ~symbols.str.startswith("FINNIFTY")
-                & ~symbols.str.startswith("MIDCPNIFTY")
-                & ~symbols.str.startswith("NIFTYNXT50")
-            )
-        part = df[(df["exchange"].astype(str) == config["exchange"]) & starts].copy()
-
-    if part.empty:
-        print(f"{index_name} strikes nahi mile.")
+        print(f"{name} strikes nahi mile.")
         return part
 
     expiries = sorted(part["expiry"].dropna().unique())
 
-    print(f"{index_name} total expiries: {len(expiries)}")
-    print(f"{index_name} expiries: {expiries}")
-    print(f"{index_name} total strikes: {len(part)}")
+    print(f"{name} total expiries: {len(expiries)}")
+    print(f"{name} expiries: {expiries}")
+    print(f"{name} total strikes: {len(part)}")
 
     return part
 
@@ -82,35 +57,36 @@ def fetch_and_filter_strikes():
         df["expiry"] = pd.to_datetime(df["expiry"], errors="coerce").dt.date
         df["strike"] = pd.to_numeric(df["strike"], errors="coerce")
         df["name"] = df["name"].astype(str).str.upper()
-        df["exchange"] = df["exchange"].astype(str)
 
         today = pd.Timestamp.today(tz="Asia/Kolkata").date()
 
         df = df[
-            (df["instrument_type"] == "OPTIDX")
-            & (df["exchange"].isin(["NSE_FO", "BSE_FO"]))
+            (df["exchange"] == "NSE_FO")
+            & (df["instrument_type"] == "OPTIDX")
             & (df["expiry"] >= today)
             & (df["strike"].notna())
             & (df["instrument_key"].notna())
             & (df["tradingsymbol"].notna())
+            & (df["name"].isin(["NIFTY", "BANKNIFTY"]))
+            & (~df["tradingsymbol"].astype(str).str.startswith("FINNIFTY"))
+            & (~df["tradingsymbol"].astype(str).str.startswith("MIDCPNIFTY"))
         ].copy()
 
         if df.empty:
-            print("Aaj ya future expiry ke index options nahi mile.")
+            print("Aaj ya future expiry ke NIFTY/BANKNIFTY options nahi mile.")
             return
 
-        frames = []
-        for index_name, config in INDEX_FILTERS.items():
-            frames.append(all_expiry_rows(df, index_name, config))
+        nifty_df = all_expiry_rows(df, "NIFTY")
+        banknifty_df = all_expiry_rows(df, "BANKNIFTY")
 
-        all_expiry_df = pd.concat(frames, ignore_index=True)
+        all_expiry_df = pd.concat([nifty_df, banknifty_df], ignore_index=True)
 
         if all_expiry_df.empty:
-            print("Requested index strikes empty hain.")
+            print("NIFTY/BANKNIFTY strikes empty hain.")
             return
 
         all_expiry_df = all_expiry_df.sort_values(
-            by=["exchange", "name", "expiry", "strike", "option_type"]
+            by=["name", "expiry", "strike", "option_type"]
         )
 
         all_expiry_df.to_csv(CSV_PATH, index=False)
@@ -121,7 +97,6 @@ def fetch_and_filter_strikes():
         print(
             all_expiry_df[
                 [
-                    "exchange",
                     "name",
                     "tradingsymbol",
                     "strike",
@@ -129,7 +104,7 @@ def fetch_and_filter_strikes():
                     "instrument_key",
                     "expiry",
                 ]
-            ].head(40)
+            ].head(30)
         )
 
     except Exception as e:
