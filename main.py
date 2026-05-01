@@ -475,7 +475,13 @@ def get_chain(
     symbol: str | None = Query(default=None),
     expiry: str | None = Query(default=None),
 ):
-    filtered_meta = all_instrument_meta or instrument_meta
+    # When app asks for a selected expiry, return the actively subscribed
+    # ATM-range instruments. Returning every listed contract for that expiry
+    # creates many rows without live feed and makes the mobile UI look blank.
+    if symbol and expiry and instrument_meta:
+        filtered_meta = instrument_meta
+    else:
+        filtered_meta = all_instrument_meta or instrument_meta
 
     if symbol:
         symbol_upper = symbol.upper()
