@@ -42,6 +42,8 @@ async def option_chain_ws(websocket: WebSocket):
                     "feeds": dict(option_chain_data.get("feeds", {})),
                     "type": option_chain_data.get("type"),
                     "currentTs": option_chain_data.get("currentTs"),
+                    "is_live": option_chain_data.get("is_live", False),
+                    "last_live_at": option_chain_data.get("last_live_at"),
                 }
             )
             await asyncio.sleep(0.5)
@@ -54,9 +56,12 @@ option_chain_data = {
     "feeds": {},
     "type": None,
     "currentTs": None,
+    "is_live": False,
+    "last_live_at": None,
 }
 
 live_candles = {}
+backend_thread = None
 
 instrument_meta = {}
 all_instrument_meta = {}
@@ -206,12 +211,6 @@ class UpstoxDataFetcher:
 
         print("Waiting for live data feed...")
 
-        option_chain_data = {
-            "feeds": {},
-            "type": None,
-            "currentTs": None,
-        }
-
         while True:
             try:
                 message = await asyncio.wait_for(self.websocket.recv(), timeout=30)
@@ -233,12 +232,15 @@ class UpstoxDataFetcher:
                 option_chain_data["feeds"].update(feeds)
                 option_chain_data["type"] = data_dict.get("type")
                 option_chain_data["currentTs"] = data_dict.get("currentTs")
+                option_chain_data["is_live"] = True
+                option_chain_data["last_live_at"] = datetime.now().isoformat()
 
                 expected_count = len(instrument_meta) + 2
                 cached_count = len(option_chain_data["feeds"])
                 print(f"Cached feeds: {cached_count} / {expected_count}")
 
                 for key, val in feeds.items():
+                    update_live_candle(key, val, data_dict.get("currentTs"))
                     full_feed = val.get("fullFeed", {})
                     market_ff = full_feed.get("marketFF", {})
                     index_ff = full_feed.get("indexFF", {})
@@ -261,6 +263,7 @@ class UpstoxDataFetcher:
                     break
 
             except Exception as e:
+                option_chain_data["is_live"] = False
                 print(f"Data Fetch Error: {e}")
                 break
 
@@ -547,6 +550,9 @@ def get_chain(
         "subscribed_instrument_count": len(instrument_meta_snapshot),
         "total_instrument_count": len(all_instrument_meta_snapshot or instrument_meta_snapshot),
         "currentTs": option_chain_data.get("currentTs"),
+        "is_live": option_chain_data.get("is_live", False),
+        "last_live_at": option_chain_data.get("last_live_at"),
+        "data_source": "live" if option_chain_data.get("is_live", False) else "fallback_csv",
     }
 
 
@@ -791,18 +797,29 @@ def start_backend():
     fetcher = UpstoxDataFetcher()
 
     async def main():
+        reconnect_delay = 3
         while True:
             if await fetcher.connect():
+                reconnect_delay = 3
                 await fetcher.subscribe(cached_keys)
                 await fetcher.fetch_live_data()
+            else:
+                option_chain_data["is_live"] = False
 
-            print("Reconnect ho raha hai 3 sec me...")
-            await asyncio.sleep(3)
+            print(f"Reconnect ho raha hai {reconnect_delay} sec me...")
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, 60)
 
     asyncio.run(main())
 
 
-threading.Thread(target=start_backend, daemon=True).start()
+@app.on_event("startup")
+def start_background_feed():
+    global backend_thread
+    if backend_thread and backend_thread.is_alive():
+        return
+    backend_thread = threading.Thread(target=start_backend, daemon=True)
+    backend_thread.start()
 
 
 
