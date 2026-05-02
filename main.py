@@ -13,11 +13,20 @@ import pandas as pd
 import requests
 from dotenv import dotenv_values
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from google.protobuf.json_format import MessageToDict
 
 from get_strikes import fetch_and_filter_strikes
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 def home():
