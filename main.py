@@ -527,6 +527,12 @@ def get_chain(
         for key, value in feeds_snapshot.items()
         if key in allowed_keys
     }
+    for key, meta in filtered_meta.items():
+        if key in filtered_feeds:
+            continue
+        fallback_feed = fallback_feed_from_meta(meta)
+        if fallback_feed:
+            filtered_feeds[key] = fallback_feed
 
     return {
         "feeds": filtered_feeds,
@@ -647,136 +653,147 @@ def get_candles(
         }
 
 
+def meta_from_row(row):
+    return {
+        "tradingsymbol": str(row.get("tradingsymbol", "")),
+        "name": str(row.get("name", "")),
+        "expiry": str(row.get("expiry", "")),
+        "strike": safe_float(row.get("strike", 0)),
+        "last_price": safe_float(row.get("last_price", 0)),
+        "option_type": str(row.get("option_type", "")),
+        "index_symbol": str(row.get("name", "")),
+        "exchange": str(row.get("exchange", "")),
+    }
+
+
+def load_instrument_cache_from_csv():
+    csv_path = BASE_DIR / "current_strikes.csv"
+    all_keys = [config["index_key"] for config in INDEX_CONFIG.values()]
+
+    if not csv_path.exists():
+        print("current_strikes.csv nahi mili. Pehle python get_strikes.py run karo.")
+        return all_keys
+
+    try:
+        df = pd.read_csv(csv_path)
+        df["strike"] = pd.to_numeric(df["strike"], errors="coerce")
+        df = df.dropna(subset=["strike", "instrument_key", "tradingsymbol"])
+
+        df["name"] = df["name"].astype(str).str.upper()
+        df["exchange"] = df["exchange"].astype(str)
+        symbols = df["tradingsymbol"].astype(str).str.upper()
+
+        selected_frames = []
+        all_frames = []
+
+        for index_name, config in INDEX_CONFIG.items():
+            index_all = df[
+                (df["exchange"] == config["exchange"])
+                & (df["name"] == config["name"])
+            ].copy()
+
+            if index_all.empty:
+                starts = symbols.str.startswith(config["name"])
+                if index_name == "NIFTY":
+                    starts = (
+                        starts
+                        & ~symbols.str.startswith("BANKNIFTY")
+                        & ~symbols.str.startswith("FINNIFTY")
+                        & ~symbols.str.startswith("MIDCPNIFTY")
+                        & ~symbols.str.startswith("NIFTYNXT50")
+                    )
+                index_all = df[(df["exchange"] == config["exchange"]) & starts].copy()
+
+            available_expiries[index_name] = get_expiry_list(index_all)
+            all_frames.append(index_all)
+
+            if index_all.empty:
+                subscribed_expiries[index_name] = []
+                print(f"{index_name} options CSV me nahi mile.")
+                continue
+
+            spot = get_last_price(config["index_key"])
+            step = config.get("step") or infer_strike_step(index_all)
+            selected = select_atm_strikes(
+                index_all,
+                index_name,
+                spot,
+                step,
+                strikes_each_side=STRIKES_EACH_SIDE,
+                expiry_count=ACTIVE_EXPIRY_COUNT,
+            )
+            selected_frames.append(selected)
+
+        selected_df = (
+            pd.concat(selected_frames, ignore_index=True)
+            if selected_frames
+            else pd.DataFrame()
+        )
+        all_expiry_df = (
+            pd.concat(all_frames, ignore_index=True)
+            if all_frames
+            else pd.DataFrame()
+        )
+
+        instrument_meta.clear()
+        all_instrument_meta.clear()
+
+        for _, row in all_expiry_df.iterrows():
+            all_instrument_meta[str(row["instrument_key"])] = meta_from_row(row)
+
+        for _, row in selected_df.iterrows():
+            instrument_meta[str(row["instrument_key"])] = meta_from_row(row)
+
+        option_keys = (
+            selected_df["instrument_key"].dropna().astype(str).tolist()
+            if not selected_df.empty
+            else []
+        )
+        all_keys.extend(option_keys)
+
+        for index_name in INDEX_CONFIG:
+            count = (
+                len(selected_df[selected_df["name"].astype(str).str.upper() == index_name])
+                if not selected_df.empty and "name" in selected_df.columns
+                else 0
+            )
+            print(f"{index_name} strikes: {count}")
+        print(f"CSV cache ready: {len(option_keys)} subscribed strikes, {len(all_instrument_meta)} total instruments.")
+        return all_keys
+    except Exception as e:
+        print(f"CSV cache load error: {e}")
+        return all_keys
+
+
+def fallback_feed_from_meta(meta):
+    last_price = safe_float(meta.get("last_price", 0), 0)
+    if last_price <= 0:
+        return None
+    return {
+        "fullFeed": {
+            "marketFF": {
+                "ltpc": {"ltp": last_price, "cp": last_price},
+                "optionGreeks": {},
+                "marketOHLC": {"ohlc": []},
+                "vtt": 0,
+                "oi": 0,
+                "iv": 0,
+            }
+        },
+        "requestMode": "fallback_csv",
+    }
+
+
 def start_backend():
     refresh_strike_csv_on_startup()
+    cached_keys = load_instrument_cache_from_csv()
 
     fetcher = UpstoxDataFetcher()
 
     async def main():
         while True:
             if await fetcher.connect():
-                all_keys = [config["index_key"] for config in INDEX_CONFIG.values()]
-
-                try:
-                    csv_path = BASE_DIR / "current_strikes.csv"
-
-                    if csv_path.exists():
-                        df = pd.read_csv(csv_path)
-                        df["strike"] = pd.to_numeric(df["strike"], errors="coerce")
-                        df = df.dropna(
-                            subset=["strike", "instrument_key", "tradingsymbol"]
-                        )
-
-                        df["name"] = df["name"].astype(str).str.upper()
-                        df["exchange"] = df["exchange"].astype(str)
-                        symbols = df["tradingsymbol"].astype(str).str.upper()
-
-                        selected_frames = []
-                        all_frames = []
-
-                        for index_name, config in INDEX_CONFIG.items():
-                            index_all = df[
-                                (df["exchange"] == config["exchange"])
-                                & (df["name"] == config["name"])
-                            ].copy()
-
-                            if index_all.empty:
-                                starts = symbols.str.startswith(config["name"])
-                                if index_name == "NIFTY":
-                                    starts = (
-                                        starts
-                                        & ~symbols.str.startswith("BANKNIFTY")
-                                        & ~symbols.str.startswith("FINNIFTY")
-                                        & ~symbols.str.startswith("MIDCPNIFTY")
-                                        & ~symbols.str.startswith("NIFTYNXT50")
-                                    )
-                                index_all = df[
-                                    (df["exchange"] == config["exchange"])
-                                    & starts
-                                ].copy()
-
-                            available_expiries[index_name] = get_expiry_list(index_all)
-                            all_frames.append(index_all)
-
-                            if index_all.empty:
-                                subscribed_expiries[index_name] = []
-                                print(f"{index_name} options CSV me nahi mile.")
-                                continue
-
-                            spot = get_last_price(config["index_key"])
-                            step = config.get("step") or infer_strike_step(index_all)
-                            selected = select_atm_strikes(
-                                index_all,
-                                index_name,
-                                spot,
-                                step,
-                                strikes_each_side=STRIKES_EACH_SIDE,
-                                expiry_count=ACTIVE_EXPIRY_COUNT,
-                            )
-                            selected_frames.append(selected)
-
-                        selected_df = (
-                            pd.concat(selected_frames, ignore_index=True)
-                            if selected_frames
-                            else pd.DataFrame()
-                        )
-
-                        instrument_meta.clear()
-                        all_instrument_meta.clear()
-
-                        all_expiry_df = (
-                            pd.concat(all_frames, ignore_index=True)
-                            if all_frames
-                            else pd.DataFrame()
-                        )
-
-                        for _, row in all_expiry_df.iterrows():
-                            key = str(row["instrument_key"])
-                            all_instrument_meta[key] = {
-                                "tradingsymbol": str(row.get("tradingsymbol", "")),
-                                "name": str(row.get("name", "")),
-                                "expiry": str(row.get("expiry", "")),
-                                "strike": safe_float(row.get("strike", 0)),
-                                "last_price": safe_float(row.get("last_price", 0)),
-                                "option_type": str(row.get("option_type", "")),
-                                "index_symbol": str(row.get("name", "")),
-                                "exchange": str(row.get("exchange", "")),
-                            }
-
-                        for _, row in selected_df.iterrows():
-                            key = str(row["instrument_key"])
-                            instrument_meta[key] = {
-                                "tradingsymbol": str(row.get("tradingsymbol", "")),
-                                "name": str(row.get("name", "")),
-                                "expiry": str(row.get("expiry", "")),
-                                "strike": safe_float(row.get("strike", 0)),
-                                "last_price": safe_float(row.get("last_price", 0)),
-                                "option_type": str(row.get("option_type", "")),
-                                "index_symbol": str(row.get("name", "")),
-                                "exchange": str(row.get("exchange", "")),
-                            }
-
-                        option_keys = (
-                            selected_df["instrument_key"].dropna().astype(str).tolist()
-                            if not selected_df.empty
-                            else []
-                        )
-                        all_keys.extend(option_keys)
-
-                        for index_name in INDEX_CONFIG:
-                            count = (
-                                len(selected_df[selected_df["name"].astype(str).str.upper() == index_name])
-                                if not selected_df.empty and "name" in selected_df.columns
-                                else 0
-                            )
-                            print(f"{index_name} strikes: {count}")
-                        print(f"CSV se total {len(option_keys)} strikes uthayi gayi hain.")
-                    else:
-                        print("current_strikes.csv nahi mili. Pehle python get_strikes.py run karo.")
-                except Exception as e:
-                    print(f"CSV Error: {e}")
-
-                await fetcher.subscribe(all_keys)
+                await fetcher.subscribe(cached_keys)
                 await fetcher.fetch_live_data()
 
             print("Reconnect ho raha hai 3 sec me...")
