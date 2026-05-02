@@ -37,7 +37,13 @@ async def option_chain_ws(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            await websocket.send_json(option_chain_data)
+            await websocket.send_json(
+                {
+                    "feeds": dict(option_chain_data.get("feeds", {})),
+                    "type": option_chain_data.get("type"),
+                    "currentTs": option_chain_data.get("currentTs"),
+                }
+            )
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         return
@@ -484,13 +490,21 @@ def get_chain(
     symbol: str | None = Query(default=None),
     expiry: str | None = Query(default=None),
 ):
+    feeds_snapshot = dict(option_chain_data.get("feeds", {}))
+    instrument_meta_snapshot = dict(instrument_meta)
+    all_instrument_meta_snapshot = dict(all_instrument_meta)
+    expiries_snapshot = {key: list(value) for key, value in available_expiries.items()}
+    subscribed_expiries_snapshot = {
+        key: list(value) for key, value in subscribed_expiries.items()
+    }
+
     # When app asks for a selected expiry, return the actively subscribed
     # ATM-range instruments. Returning every listed contract for that expiry
     # creates many rows without live feed and makes the mobile UI look blank.
-    if symbol and expiry and instrument_meta:
-        filtered_meta = instrument_meta
+    if symbol and expiry and instrument_meta_snapshot:
+        filtered_meta = instrument_meta_snapshot
     else:
-        filtered_meta = all_instrument_meta or instrument_meta
+        filtered_meta = all_instrument_meta_snapshot or instrument_meta_snapshot
 
     if symbol:
         symbol_upper = symbol.upper()
@@ -510,22 +524,22 @@ def get_chain(
     allowed_keys = set(filtered_meta.keys()) | {config["index_key"] for config in INDEX_CONFIG.values()}
     filtered_feeds = {
         key: value
-        for key, value in option_chain_data.get("feeds", {}).items()
+        for key, value in feeds_snapshot.items()
         if key in allowed_keys
     }
 
     return {
         "feeds": filtered_feeds,
         "instruments": filtered_meta,
-        "expiries": available_expiries,
-        "subscribed_expiries": subscribed_expiries,
+        "expiries": expiries_snapshot,
+        "subscribed_expiries": subscribed_expiries_snapshot,
         "selected_symbol": symbol,
         "selected_expiry": expiry,
         "cached_feed_count": len(filtered_feeds),
-        "total_cached_feed_count": len(option_chain_data.get("feeds", {})),
+        "total_cached_feed_count": len(feeds_snapshot),
         "instrument_count": len(filtered_meta),
-        "subscribed_instrument_count": len(instrument_meta),
-        "total_instrument_count": len(all_instrument_meta or instrument_meta),
+        "subscribed_instrument_count": len(instrument_meta_snapshot),
+        "total_instrument_count": len(all_instrument_meta_snapshot or instrument_meta_snapshot),
         "currentTs": option_chain_data.get("currentTs"),
     }
 
