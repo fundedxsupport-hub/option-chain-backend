@@ -33,7 +33,11 @@ def home():
     return {"status": "running"}
 
 @app.websocket("/ws/option-chain")
-async def option_chain_ws(websocket: WebSocket):
+async def option_chain_ws(
+    websocket: WebSocket,
+    symbol: str | None = None,
+    expiry: str | None = None,
+):
     await websocket.accept()
     last_sent_version = -1
     last_snapshot_at = 0.0
@@ -45,25 +49,20 @@ async def option_chain_ws(websocket: WebSocket):
             should_send_snapshot = now - last_snapshot_at >= 2.0
 
             if should_send_delta or should_send_snapshot:
-                delta_feeds = option_chain_data.get("delta_feeds", {})
-                feeds = (
-                    dict(option_chain_data.get("feeds", {}))
-                    if should_send_snapshot or last_sent_version < 0
-                    else dict(delta_feeds)
+                payload = build_option_chain_payload(
+                    symbol=symbol,
+                    expiry=expiry,
+                    delta_only=not (should_send_snapshot or last_sent_version < 0),
                 )
                 await websocket.send_json(
                     {
-                        "feeds": feeds,
-                        "type": option_chain_data.get("type"),
-                        "currentTs": option_chain_data.get("currentTs"),
-                        "is_live": option_chain_data.get("is_live", False),
-                        "last_live_at": option_chain_data.get("last_live_at"),
+                        **payload,
                         "version": current_version,
                         "snapshot": should_send_snapshot or last_sent_version < 0,
                     }
                 )
                 last_sent_version = current_version
-                if should_send_snapshot or last_sent_version < 0:
+                if should_send_snapshot:
                     last_snapshot_at = now
 
             await asyncio.sleep(0.02)
@@ -512,12 +511,14 @@ def select_atm_strikes(
 
     return selected
 
-@app.get("/option-chain")
-def get_chain(
-    symbol: str | None = Query(default=None),
-    expiry: str | None = Query(default=None),
+def build_option_chain_payload(
+    symbol: str | None = None,
+    expiry: str | None = None,
+    delta_only: bool = False,
 ):
-    feeds_snapshot = dict(option_chain_data.get("feeds", {}))
+    feeds_snapshot = dict(
+        option_chain_data.get("delta_feeds" if delta_only else "feeds", {})
+    )
     instrument_meta_snapshot = dict(instrument_meta)
     all_instrument_meta_snapshot = dict(all_instrument_meta)
     expiries_snapshot = {key: list(value) for key, value in available_expiries.items()}
@@ -525,9 +526,6 @@ def get_chain(
         key: list(value) for key, value in subscribed_expiries.items()
     }
 
-    # When app asks for a selected expiry, return the actively subscribed
-    # ATM-range instruments. Returning every listed contract for that expiry
-    # creates many rows without live feed and makes the mobile UI look blank.
     if symbol and expiry and instrument_meta_snapshot:
         filtered_meta = instrument_meta_snapshot
     else:
@@ -548,36 +546,48 @@ def get_chain(
             if value.get("expiry") == expiry
         }
 
-    allowed_keys = set(filtered_meta.keys()) | {config["index_key"] for config in INDEX_CONFIG.values()}
+    allowed_keys = set(filtered_meta.keys()) | {
+        config["index_key"] for config in INDEX_CONFIG.values()
+    }
     filtered_feeds = {
         key: value
         for key, value in feeds_snapshot.items()
         if key in allowed_keys
     }
-    for key, meta in filtered_meta.items():
-        if key in filtered_feeds:
-            continue
-        fallback_feed = fallback_feed_from_meta(meta)
-        if fallback_feed:
-            filtered_feeds[key] = fallback_feed
+
+    if not delta_only:
+        for key, meta in filtered_meta.items():
+            if key in filtered_feeds:
+                continue
+            fallback_feed = fallback_feed_from_meta(meta)
+            if fallback_feed:
+                filtered_feeds[key] = fallback_feed
 
     return {
         "feeds": filtered_feeds,
-        "instruments": filtered_meta,
-        "expiries": expiries_snapshot,
-        "subscribed_expiries": subscribed_expiries_snapshot,
+        "instruments": {} if delta_only else filtered_meta,
+        "expiries": {} if delta_only else expiries_snapshot,
+        "subscribed_expiries": {} if delta_only else subscribed_expiries_snapshot,
         "selected_symbol": symbol,
         "selected_expiry": expiry,
         "cached_feed_count": len(filtered_feeds),
-        "total_cached_feed_count": len(feeds_snapshot),
+        "total_cached_feed_count": len(option_chain_data.get("feeds", {})),
         "instrument_count": len(filtered_meta),
         "subscribed_instrument_count": len(instrument_meta_snapshot),
         "total_instrument_count": len(all_instrument_meta_snapshot or instrument_meta_snapshot),
+        "type": option_chain_data.get("type"),
         "currentTs": option_chain_data.get("currentTs"),
         "is_live": option_chain_data.get("is_live", False),
         "last_live_at": option_chain_data.get("last_live_at"),
         "data_source": "live" if option_chain_data.get("is_live", False) else "fallback_csv",
     }
+
+@app.get("/option-chain")
+def get_chain(
+    symbol: str | None = Query(default=None),
+    expiry: str | None = Query(default=None),
+):
+    return build_option_chain_payload(symbol=symbol, expiry=expiry)
 
 
 @app.get("/expiries")
