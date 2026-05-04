@@ -35,18 +35,38 @@ def home():
 @app.websocket("/ws/option-chain")
 async def option_chain_ws(websocket: WebSocket):
     await websocket.accept()
+    last_sent_version = -1
+    last_snapshot_at = 0.0
     try:
         while True:
-            await websocket.send_json(
-                {
-                    "feeds": dict(option_chain_data.get("feeds", {})),
-                    "type": option_chain_data.get("type"),
-                    "currentTs": option_chain_data.get("currentTs"),
-                    "is_live": option_chain_data.get("is_live", False),
-                    "last_live_at": option_chain_data.get("last_live_at"),
-                }
-            )
-            await asyncio.sleep(0.5)
+            current_version = option_chain_data.get("version", 0)
+            now = asyncio.get_running_loop().time()
+            should_send_delta = current_version != last_sent_version
+            should_send_snapshot = now - last_snapshot_at >= 2.0
+
+            if should_send_delta or should_send_snapshot:
+                delta_feeds = option_chain_data.get("delta_feeds", {})
+                feeds = (
+                    dict(option_chain_data.get("feeds", {}))
+                    if should_send_snapshot or last_sent_version < 0
+                    else dict(delta_feeds)
+                )
+                await websocket.send_json(
+                    {
+                        "feeds": feeds,
+                        "type": option_chain_data.get("type"),
+                        "currentTs": option_chain_data.get("currentTs"),
+                        "is_live": option_chain_data.get("is_live", False),
+                        "last_live_at": option_chain_data.get("last_live_at"),
+                        "version": current_version,
+                        "snapshot": should_send_snapshot or last_sent_version < 0,
+                    }
+                )
+                last_sent_version = current_version
+                if should_send_snapshot or last_sent_version < 0:
+                    last_snapshot_at = now
+
+            await asyncio.sleep(0.02)
     except WebSocketDisconnect:
         return
     except Exception as e:
@@ -58,6 +78,8 @@ option_chain_data = {
     "currentTs": None,
     "is_live": False,
     "last_live_at": None,
+    "version": 0,
+    "delta_feeds": {},
 }
 
 live_candles = {}
@@ -230,10 +252,12 @@ class UpstoxDataFetcher:
 
                 option_chain_data.setdefault("feeds", {})
                 option_chain_data["feeds"].update(feeds)
+                option_chain_data["delta_feeds"] = feeds
                 option_chain_data["type"] = data_dict.get("type")
                 option_chain_data["currentTs"] = data_dict.get("currentTs")
                 option_chain_data["is_live"] = True
                 option_chain_data["last_live_at"] = datetime.now().isoformat()
+                option_chain_data["version"] = option_chain_data.get("version", 0) + 1
 
                 expected_count = len(instrument_meta) + 2
                 cached_count = len(option_chain_data["feeds"])
