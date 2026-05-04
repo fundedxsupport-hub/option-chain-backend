@@ -46,7 +46,7 @@ async def option_chain_ws(
             current_version = option_chain_data.get("version", 0)
             now = asyncio.get_running_loop().time()
             should_send_delta = current_version != last_sent_version
-            should_send_snapshot = now - last_snapshot_at >= 2.0
+            should_send_snapshot = last_sent_version < 0 or now - last_snapshot_at >= 10.0
 
             if should_send_delta or should_send_snapshot:
                 payload = build_option_chain_payload(
@@ -65,7 +65,7 @@ async def option_chain_ws(
                 if should_send_snapshot:
                     last_snapshot_at = now
 
-            await asyncio.sleep(0.02)
+            await asyncio.to_thread(wait_for_feed_update, last_sent_version, 5.0)
     except WebSocketDisconnect:
         return
     except Exception as e:
@@ -80,6 +80,21 @@ option_chain_data = {
     "version": 0,
     "delta_feeds": {},
 }
+feed_condition = threading.Condition()
+
+
+def notify_feed_update():
+    with feed_condition:
+        feed_condition.notify_all()
+
+
+def wait_for_feed_update(last_version, timeout):
+    with feed_condition:
+        feed_condition.wait_for(
+            lambda: option_chain_data.get("version", 0) != last_version,
+            timeout=timeout,
+        )
+        return option_chain_data.get("version", 0)
 
 live_candles = {}
 backend_thread = None
@@ -257,6 +272,7 @@ class UpstoxDataFetcher:
                 option_chain_data["is_live"] = True
                 option_chain_data["last_live_at"] = datetime.now().isoformat()
                 option_chain_data["version"] = option_chain_data.get("version", 0) + 1
+                notify_feed_update()
 
                 expected_count = len(instrument_meta) + 2
                 cached_count = len(option_chain_data["feeds"])
