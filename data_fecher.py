@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # .env se token uthao
 load_dotenv()
 # Yahan dhyan dena: .env mein ACCESS_TOKEN="aapka_token" hona chahiye
-TOKEN = os.getenv("ACCESS_TOKEN") or "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIyREFNNDUiLCJqdGkiOiI2OWZjNDcxYzU2Y2E0NTAwN2E4OGQ2MGUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3ODE0MDk1NiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc4MTkxMjAwfQ.2x9kMyiKvswQp4d9zZDUe4f-pcXN0mAxISbQcVrminw"
+TOKEN = os.getenv("ACCESS_TOKEN") or "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIyREFNNDUiLCJqdGkiOiI2OWZkNzcxODU3OTRkZTVhNGI1NTcxM2UiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3ODIxODc3NiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc4Mjc3NjAwfQ.eaySv3hEHaOf1pgbBH90M2RCVG0glzDv3HA3HEsSclk"
 
 class UpstoxDataFetcher:
     def __init__(self):
