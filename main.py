@@ -7,6 +7,7 @@ import base64
 from pathlib import Path
 from urllib.parse import quote
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import MarketDataFeed_pb2 as pb2
 import pandas as pd
@@ -65,7 +66,10 @@ async def option_chain_ws(
                 if should_send_snapshot:
                     last_snapshot_at = now
 
-            await asyncio.to_thread(wait_for_feed_update, last_sent_version, 5.0)
+            if option_chain_data.get("market_open", False):
+                await asyncio.to_thread(wait_for_feed_update, last_sent_version, 5.0)
+            else:
+                await asyncio.sleep(5)
     except WebSocketDisconnect:
         return
     except Exception as e:
@@ -77,6 +81,8 @@ option_chain_data = {
     "currentTs": None,
     "is_live": False,
     "last_live_at": None,
+    "market_open": False,
+    "market_status": "initializing",
     "version": 0,
     "delta_feeds": {},
 }
@@ -98,6 +104,11 @@ def wait_for_feed_update(last_version, timeout):
 
 live_candles = {}
 backend_thread = None
+IST = ZoneInfo("Asia/Kolkata")
+MARKET_OPEN_HOUR = 8
+MARKET_OPEN_MINUTE = 30
+MARKET_CLOSE_HOUR = 16
+MARKET_CLOSE_MINUTE = 0
 
 instrument_meta = {}
 all_instrument_meta = {}
@@ -122,6 +133,63 @@ DOTENV_VALUES = dotenv_values(BASE_DIR / ".env")
 
 def clean_token(value):
     return (value or "").strip().strip('"').strip("'")
+
+
+def get_ist_now():
+    return datetime.now(IST)
+
+
+def is_market_open_ist(now=None):
+    now = now or get_ist_now()
+    if now.weekday() > 4:
+        return False
+    minutes = now.hour * 60 + now.minute
+    open_minutes = MARKET_OPEN_HOUR * 60 + MARKET_OPEN_MINUTE
+    close_minutes = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MINUTE
+    return open_minutes <= minutes <= close_minutes
+
+
+def current_market_status(now=None):
+    now = now or get_ist_now()
+    if now.weekday() > 4:
+        return "closed_weekend"
+    minutes = now.hour * 60 + now.minute
+    open_minutes = MARKET_OPEN_HOUR * 60 + MARKET_OPEN_MINUTE
+    close_minutes = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MINUTE
+    if minutes < open_minutes:
+        return "pre_open_wait"
+    if minutes > close_minutes:
+        return "closed_after_hours"
+    return "live_market"
+
+
+def seconds_until_next_market_window(now=None):
+    now = now or get_ist_now()
+    open_today = now.replace(
+        hour=MARKET_OPEN_HOUR,
+        minute=MARKET_OPEN_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if now.weekday() <= 4 and now < open_today:
+        return max(30, int((open_today - now).total_seconds()))
+
+    next_day = now + timedelta(days=1)
+    while next_day.weekday() > 4:
+        next_day += timedelta(days=1)
+    next_open = next_day.replace(
+        hour=MARKET_OPEN_HOUR,
+        minute=MARKET_OPEN_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    return max(30, int((next_open - now).total_seconds()))
+
+
+def set_market_state(*, live, status):
+    option_chain_data["is_live"] = live
+    option_chain_data["market_open"] = status == "live_market"
+    option_chain_data["market_status"] = status
 
 
 def get_token_info():
@@ -269,7 +337,7 @@ class UpstoxDataFetcher:
                 option_chain_data["delta_feeds"] = feeds
                 option_chain_data["type"] = data_dict.get("type")
                 option_chain_data["currentTs"] = data_dict.get("currentTs")
-                option_chain_data["is_live"] = True
+                set_market_state(live=True, status=current_market_status())
                 option_chain_data["last_live_at"] = datetime.now().isoformat()
                 option_chain_data["version"] = option_chain_data.get("version", 0) + 1
                 notify_feed_update()
@@ -302,7 +370,7 @@ class UpstoxDataFetcher:
                     break
 
             except Exception as e:
-                option_chain_data["is_live"] = False
+                set_market_state(live=False, status=current_market_status())
                 print(f"Data Fetch Error: {e}")
                 break
 
@@ -594,8 +662,10 @@ def build_option_chain_payload(
         "type": option_chain_data.get("type"),
         "currentTs": option_chain_data.get("currentTs"),
         "is_live": option_chain_data.get("is_live", False),
+        "market_open": option_chain_data.get("market_open", False),
+        "market_status": option_chain_data.get("market_status"),
         "last_live_at": option_chain_data.get("last_live_at"),
-        "data_source": "live" if option_chain_data.get("is_live", False) else "fallback_csv",
+        "data_source": "live" if option_chain_data.get("is_live", False) else "cached_snapshot",
     }
 
 @app.get("/option-chain")
@@ -849,12 +919,24 @@ def start_backend():
     async def main():
         reconnect_delay = 3
         while True:
+            status = current_market_status()
+            if not is_market_open_ist():
+                set_market_state(live=False, status=status)
+                sleep_for = min(seconds_until_next_market_window(), 300)
+                print(
+                    f"Market closed mode: {status}. Last snapshot serve hoga. "
+                    f"Next live check {sleep_for} sec me."
+                )
+                await asyncio.sleep(sleep_for)
+                continue
+
             if await fetcher.connect():
+                set_market_state(live=True, status=status)
                 reconnect_delay = 3
                 await fetcher.subscribe(cached_keys)
                 await fetcher.fetch_live_data()
             else:
-                option_chain_data["is_live"] = False
+                set_market_state(live=False, status=current_market_status())
 
             print(f"Reconnect ho raha hai {reconnect_delay} sec me...")
             await asyncio.sleep(reconnect_delay)
