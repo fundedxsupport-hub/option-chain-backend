@@ -1,0 +1,30 @@
+name: Railway Start Option Chain Backend
+
+on:
+  schedule:
+    - cron: "0 3 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  start-service:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Link Railway Service
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
+        run: railway link -p "$RAILWAY_PROJECT_ID" -s "$RAILWAY_SERVICE_ID" -e production
+
+      - name: Redeploy Railway Service
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway redeploy --yes
