@@ -47,7 +47,7 @@ async def option_chain_ws(
             current_version = option_chain_data.get("version", 0)
             now = asyncio.get_running_loop().time()
             should_send_delta = current_version != last_sent_version
-            should_send_snapshot = last_sent_version < 0 or now - last_snapshot_at >= 10.0
+            should_send_snapshot = last_sent_version < 0 or now - last_snapshot_at >= 2.0
 
             if should_send_delta or should_send_snapshot:
                 payload = build_option_chain_payload(
@@ -67,9 +67,9 @@ async def option_chain_ws(
                     last_snapshot_at = now
 
             if option_chain_data.get("market_open", False):
-                await asyncio.to_thread(wait_for_feed_update, last_sent_version, 5.0)
+                await asyncio.to_thread(wait_for_feed_update, last_sent_version, 0.25)
             else:
-                await asyncio.sleep(5)
+                await asyncio.sleep(1)
     except WebSocketDisconnect:
         return
     except Exception as e:
