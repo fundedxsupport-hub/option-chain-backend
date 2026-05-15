@@ -47,7 +47,7 @@ async def option_chain_ws(
             current_version = option_chain_data.get("version", 0)
             now = asyncio.get_running_loop().time()
             should_send_delta = current_version != last_sent_version
-            should_send_snapshot = last_sent_version < 0 or now - last_snapshot_at >= 10.0
+            should_send_snapshot = last_sent_version < 0 or now - last_snapshot_at >= 1.0
 
             if should_send_delta or should_send_snapshot:
                 payload = build_option_chain_payload(
@@ -66,11 +66,80 @@ async def option_chain_ws(
                 if should_send_snapshot:
                     last_snapshot_at = now
 
-            await asyncio.to_thread(wait_for_feed_update, last_sent_version, 5.0)
+            await asyncio.to_thread(wait_for_feed_update, last_sent_version, 0.25)
     except WebSocketDisconnect:
         return
     except Exception as e:
         print(f"Client websocket error: {e}")
+
+
+@app.websocket("/ws/index")
+async def index_ws(websocket: WebSocket):
+    await websocket.accept()
+    last_sent_version = -1
+    last_snapshot_at = 0.0
+    try:
+        while True:
+            current_version = option_chain_data.get("version", 0)
+            now = asyncio.get_running_loop().time()
+            should_send_delta = current_version != last_sent_version
+            should_send_snapshot = last_sent_version < 0 or now - last_snapshot_at >= 1.0
+
+            if should_send_delta or should_send_snapshot:
+                payload = build_index_payload(
+                    delta_only=not (should_send_snapshot or last_sent_version < 0)
+                )
+                await websocket.send_json(
+                    {
+                        **payload,
+                        "version": current_version,
+                        "snapshot": should_send_snapshot or last_sent_version < 0,
+                    }
+                )
+                last_sent_version = current_version
+                if should_send_snapshot:
+                    last_snapshot_at = now
+
+            await asyncio.to_thread(wait_for_feed_update, last_sent_version, 0.25)
+    except WebSocketDisconnect:
+        return
+    except Exception as e:
+        print(f"Index websocket error: {e}")
+
+
+@app.websocket("/ws/chart")
+async def chart_ws(
+    websocket: WebSocket,
+    instrument_key: str,
+):
+    await websocket.accept()
+    last_sent_version = -1
+    last_snapshot_at = 0.0
+    try:
+        while True:
+            current_version = option_chain_data.get("version", 0)
+            now = asyncio.get_running_loop().time()
+            should_send_delta = current_version != last_sent_version
+            should_send_snapshot = last_sent_version < 0 or now - last_snapshot_at >= 1.0
+
+            if should_send_delta or should_send_snapshot:
+                payload = build_chart_payload(instrument_key)
+                await websocket.send_json(
+                    {
+                        **payload,
+                        "version": current_version,
+                        "snapshot": should_send_snapshot or last_sent_version < 0,
+                    }
+                )
+                last_sent_version = current_version
+                if should_send_snapshot:
+                    last_snapshot_at = now
+
+            await asyncio.to_thread(wait_for_feed_update, last_sent_version, 0.25)
+    except WebSocketDisconnect:
+        return
+    except Exception as e:
+        print(f"Chart websocket error: {e}")
 
 option_chain_data = {
     "feeds": {},
@@ -598,6 +667,40 @@ def build_option_chain_payload(
         "data_source": "live" if option_chain_data.get("is_live", False) else "fallback_csv",
     }
 
+
+def build_index_payload(delta_only: bool = False):
+    feeds_snapshot = dict(
+        option_chain_data.get("delta_feeds" if delta_only else "feeds", {})
+    )
+    index_keys = {config["index_key"] for config in INDEX_CONFIG.values()}
+    filtered_feeds = {
+        key: value
+        for key, value in feeds_snapshot.items()
+        if key in index_keys
+    }
+
+    return {
+        "feeds": filtered_feeds,
+        "type": option_chain_data.get("type"),
+        "currentTs": option_chain_data.get("currentTs"),
+        "is_live": option_chain_data.get("is_live", False),
+        "last_live_at": option_chain_data.get("last_live_at"),
+        "data_source": "live" if option_chain_data.get("is_live", False) else "fallback_csv",
+    }
+
+
+def build_chart_payload(instrument_key: str):
+    feeds_snapshot = dict(option_chain_data.get("feeds", {}))
+    feed = feeds_snapshot.get(instrument_key, {})
+    return {
+        "instrument_key": instrument_key,
+        "feed": feed,
+        "currentTs": option_chain_data.get("currentTs"),
+        "is_live": option_chain_data.get("is_live", False),
+        "last_live_at": option_chain_data.get("last_live_at"),
+        "data_source": "live" if option_chain_data.get("is_live", False) else "fallback_csv",
+    }
+
 @app.get("/option-chain")
 def get_chain(
     symbol: Optional[str] = Query(default=None),
@@ -847,10 +950,10 @@ def start_backend():
     fetcher = UpstoxDataFetcher()
 
     async def main():
-        reconnect_delay = 3
+        reconnect_delay = 2
         while True:
             if await fetcher.connect():
-                reconnect_delay = 3
+                reconnect_delay = 2
                 await fetcher.subscribe(cached_keys)
                 await fetcher.fetch_live_data()
             else:
@@ -858,7 +961,6 @@ def start_backend():
 
             print(f"Reconnect ho raha hai {reconnect_delay} sec me...")
             await asyncio.sleep(reconnect_delay)
-            reconnect_delay = min(reconnect_delay * 2, 60)
 
     asyncio.run(main())
 
