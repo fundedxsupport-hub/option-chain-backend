@@ -4,6 +4,7 @@ import websockets
 import json
 import threading
 import base64
+import ssl
 from typing import Optional
 from pathlib import Path
 from urllib.parse import quote
@@ -190,7 +191,8 @@ class UpstoxDataFetcher:
         url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
         headers = {
             "Authorization": f"Bearer {TOKEN}",
-            "Accept": "*/*",
+            "Accept": "application/json",
+            "Api-Version": "2.0",
         }
 
         try:
@@ -217,8 +219,12 @@ class UpstoxDataFetcher:
                 return False
 
             print("Authorized URL Mili:", auth_ws_url[:60], "...")
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
             self.websocket = await websockets.connect(
                 auth_ws_url,
+                ssl=ssl_context,
                 max_size=None,
                 ping_interval=20,
                 ping_timeout=20,
@@ -848,18 +854,15 @@ def start_backend():
     fetcher = UpstoxDataFetcher()
 
     async def main():
-        reconnect_delay = 3
         while True:
             if await fetcher.connect():
-                reconnect_delay = 3
                 await fetcher.subscribe(cached_keys)
                 await fetcher.fetch_live_data()
             else:
                 option_chain_data["is_live"] = False
 
-            print(f"Reconnect ho raha hai {reconnect_delay} sec me...")
-            await asyncio.sleep(reconnect_delay)
-            reconnect_delay = min(reconnect_delay * 2, 60)
+            print("Reconnect ho raha hai 3 sec me...")
+            await asyncio.sleep(3)
 
     asyncio.run(main())
 
