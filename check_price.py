@@ -1,7 +1,9 @@
 import requests
+import os
+from dotenv import load_dotenv
 
-# 1. Aapka token (Maine wahi rakha hai jo aapne bheja)
-ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIyREFNNDUiLCJqdGkiOiI2YTA2YzYyYjViZGYwYTYwNzM1NDUyNjciLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3ODgyODg0MywiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc4ODgyNDAwfQ.EQgVFGhpDznmcWIKRMLztcmX1DJE1lkdrazhYvdnDpc"
+load_dotenv()
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN") or "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIyREFNNDUiLCJqdGkiOiI2YTA2ZTJmZDViZGYwYTYwNzM1NDU1YTgiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3ODgzNjIyMSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc4ODgyNDAwfQ.JwNKsbYtoImVePsBQt_Pq-beEGYaxRq2KelU5eCtqyc"
 
 def get_last_price():
     # 2. Dono Indices ki keys (Comma se separate karke)

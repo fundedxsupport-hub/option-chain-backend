@@ -1,14 +1,14 @@
 import os
 import asyncio
+import ssl
 import websockets
 import json
 import threading
 import base64
-import ssl
-from typing import Optional
 from pathlib import Path
 from urllib.parse import quote
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import MarketDataFeed_pb2 as pb2
 import pandas as pd
@@ -37,8 +37,8 @@ def home():
 @app.websocket("/ws/option-chain")
 async def option_chain_ws(
     websocket: WebSocket,
-    symbol: Optional[str] = None,
-    expiry: Optional[str] = None,
+    symbol: str | None = None,
+    expiry: str | None = None,
 ):
     await websocket.accept()
     last_sent_version = -1
@@ -48,7 +48,7 @@ async def option_chain_ws(
             current_version = option_chain_data.get("version", 0)
             now = asyncio.get_running_loop().time()
             should_send_delta = current_version != last_sent_version
-            should_send_snapshot = last_sent_version < 0 or now - last_snapshot_at >= 10.0
+            should_send_snapshot = last_sent_version < 0 or now - last_snapshot_at >= 2.0
 
             if should_send_delta or should_send_snapshot:
                 payload = build_option_chain_payload(
@@ -67,7 +67,10 @@ async def option_chain_ws(
                 if should_send_snapshot:
                     last_snapshot_at = now
 
-            await asyncio.to_thread(wait_for_feed_update, last_sent_version, 5.0)
+            if option_chain_data.get("market_open", False):
+                await asyncio.to_thread(wait_for_feed_update, last_sent_version, 0.25)
+            else:
+                await asyncio.sleep(1)
     except WebSocketDisconnect:
         return
     except Exception as e:
@@ -79,6 +82,8 @@ option_chain_data = {
     "currentTs": None,
     "is_live": False,
     "last_live_at": None,
+    "market_open": False,
+    "market_status": "initializing",
     "version": 0,
     "delta_feeds": {},
 }
@@ -100,6 +105,11 @@ def wait_for_feed_update(last_version, timeout):
 
 live_candles = {}
 backend_thread = None
+IST = ZoneInfo("Asia/Kolkata")
+MARKET_OPEN_HOUR = 8
+MARKET_OPEN_MINUTE = 30
+MARKET_CLOSE_HOUR = 16
+MARKET_CLOSE_MINUTE = 0
 
 instrument_meta = {}
 all_instrument_meta = {}
@@ -126,6 +136,63 @@ def clean_token(value):
     return (value or "").strip().strip('"').strip("'")
 
 
+def get_ist_now():
+    return datetime.now(IST)
+
+
+def is_market_open_ist(now=None):
+    now = now or get_ist_now()
+    if now.weekday() > 4:
+        return False
+    minutes = now.hour * 60 + now.minute
+    open_minutes = MARKET_OPEN_HOUR * 60 + MARKET_OPEN_MINUTE
+    close_minutes = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MINUTE
+    return open_minutes <= minutes <= close_minutes
+
+
+def current_market_status(now=None):
+    now = now or get_ist_now()
+    if now.weekday() > 4:
+        return "closed_weekend"
+    minutes = now.hour * 60 + now.minute
+    open_minutes = MARKET_OPEN_HOUR * 60 + MARKET_OPEN_MINUTE
+    close_minutes = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MINUTE
+    if minutes < open_minutes:
+        return "pre_open_wait"
+    if minutes > close_minutes:
+        return "closed_after_hours"
+    return "live_market"
+
+
+def seconds_until_next_market_window(now=None):
+    now = now or get_ist_now()
+    open_today = now.replace(
+        hour=MARKET_OPEN_HOUR,
+        minute=MARKET_OPEN_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if now.weekday() <= 4 and now < open_today:
+        return max(30, int((open_today - now).total_seconds()))
+
+    next_day = now + timedelta(days=1)
+    while next_day.weekday() > 4:
+        next_day += timedelta(days=1)
+    next_open = next_day.replace(
+        hour=MARKET_OPEN_HOUR,
+        minute=MARKET_OPEN_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    return max(30, int((next_open - now).total_seconds()))
+
+
+def set_market_state(*, live, status):
+    option_chain_data["is_live"] = live
+    option_chain_data["market_open"] = status == "live_market"
+    option_chain_data["market_status"] = status
+
+
 def get_token_info():
     # Render/dashboard environment should win. .env is only a local fallback.
     for name in ("UPSTOX_ACCESS_TOKEN", "ACCESS_TOKEN"):
@@ -141,24 +208,49 @@ def get_token_info():
     return "missing", ""
 
 
+def token_expiry_epoch(token: str) -> int | None:
+    try:
+        payload_part = token.split(".")[1]
+        padded_payload = payload_part + "=" * (-len(payload_part) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded_payload))
+        exp = payload.get("exp")
+        return int(exp) if exp is not None else None
+    except Exception:
+        return None
+
+
+def is_token_expired(token: str) -> bool:
+    exp = token_expiry_epoch(token)
+    if exp is None:
+        return False
+    return datetime.now().timestamp() >= exp
+
+
+def reload_token() -> None:
+    global TOKEN, TOKEN_SOURCE
+    TOKEN_SOURCE, TOKEN = get_token_info()
+    print_token_debug(TOKEN_SOURCE, TOKEN)
+
+
+def force_live_feed_enabled() -> bool:
+    return os.getenv("FORCE_LIVE_FEED", "").strip().lower() in ("1", "true", "yes")
+
+
+def should_connect_upstox_feed() -> bool:
+    if force_live_feed_enabled():
+        return True
+    return is_market_open_ist()
+
+
 def print_token_debug(source, token):
     if not token:
         print("Token debug: token missing")
         return
 
     expiry = "unknown"
-    try:
-        payload_part = token.split(".")[1]
-        padded_payload = payload_part + "=" * (-len(payload_part) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded_payload))
-        if payload.get("exp"):
-            from datetime import datetime
-
-            expiry = datetime.fromtimestamp(payload["exp"]).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-    except Exception:
-        pass
+    exp_epoch = token_expiry_epoch(token)
+    if exp_epoch:
+        expiry = datetime.fromtimestamp(exp_epoch).strftime("%Y-%m-%d %H:%M:%S")
 
     print(
         "Token debug:",
@@ -167,6 +259,7 @@ def print_token_debug(source, token):
         f"starts={token[:8]}",
         f"ends={token[-8:]}",
         f"expiry={expiry}",
+        f"expired={'YES' if is_token_expired(token) else 'no'}",
     )
 
 
@@ -183,16 +276,32 @@ def refresh_strike_csv_on_startup():
         print(f"Startup strike refresh failed: {e}")
 
 
+def _print_upstox_403_help() -> None:
+    print("Upstox WebSocket 403:")
+    print("  - Sirf EK backend chalao (purane terminal band)")
+    print("  - uvicorn --reload mat use karo")
+    print("  - .env token change ke baad process kill + restart")
+    print("  - Do jagah same token se connect mat karo")
+
+
 class UpstoxDataFetcher:
     def __init__(self):
         self.websocket = None
+        self.last_error_was_403 = False
+
+    async def disconnect(self) -> None:
+        if self.websocket is not None:
+            try:
+                await self.websocket.close()
+            except Exception:
+                pass
+            self.websocket = None
 
     def get_authorized_ws_url(self):
         url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
         headers = {
             "Authorization": f"Bearer {TOKEN}",
-            "Accept": "application/json",
-            "Api-Version": "2.0",
+            "Accept": "*/*",
         }
 
         try:
@@ -208,9 +317,20 @@ class UpstoxDataFetcher:
             return None
 
     async def connect(self):
+        self.last_error_was_403 = False
+        await self.disconnect()
+        reload_token()
+
         try:
             if not TOKEN:
                 print("UPSTOX_ACCESS_TOKEN / ACCESS_TOKEN nahi mila")
+                return False
+
+            if is_token_expired(TOKEN):
+                exp = token_expiry_epoch(TOKEN)
+                when = datetime.fromtimestamp(exp).strftime("%Y-%m-%d %H:%M:%S") if exp else "?"
+                print("TOKEN EXPIRED — naya Upstox token .env mein daalo, phir restart.")
+                print(f"Expiry (local): {when}")
                 return False
 
             auth_ws_url = self.get_authorized_ws_url()
@@ -220,8 +340,6 @@ class UpstoxDataFetcher:
 
             print("Authorized URL Mili:", auth_ws_url[:60], "...")
             ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
             self.websocket = await websockets.connect(
                 auth_ws_url,
                 ssl=ssl_context,
@@ -234,6 +352,9 @@ class UpstoxDataFetcher:
             return True
         except Exception as e:
             print(f"Connection Failed: {e}")
+            if "403" in str(e):
+                self.last_error_was_403 = True
+                _print_upstox_403_help()
             return False
 
     async def subscribe(self, instrument_keys):
@@ -276,7 +397,7 @@ class UpstoxDataFetcher:
                 option_chain_data["delta_feeds"] = feeds
                 option_chain_data["type"] = data_dict.get("type")
                 option_chain_data["currentTs"] = data_dict.get("currentTs")
-                option_chain_data["is_live"] = True
+                set_market_state(live=True, status=current_market_status())
                 option_chain_data["last_live_at"] = datetime.now().isoformat()
                 option_chain_data["version"] = option_chain_data.get("version", 0) + 1
                 notify_feed_update()
@@ -309,7 +430,7 @@ class UpstoxDataFetcher:
                     break
 
             except Exception as e:
-                option_chain_data["is_live"] = False
+                set_market_state(live=False, status=current_market_status())
                 print(f"Data Fetch Error: {e}")
                 break
 
@@ -317,7 +438,7 @@ class UpstoxDataFetcher:
 def get_last_price(symbol):
     url = f"https://api.upstox.com/v2/market-quote/quotes?symbol={symbol}"
     headers = {
-        "Accept": "*/*",
+        "Accept": "application/json",
         "Authorization": f"Bearer {TOKEN}",
     }
 
@@ -337,6 +458,169 @@ def get_last_price(symbol):
     except Exception as e:
         print(f"LTP fetch failed for {symbol}: {e}")
         return None
+
+
+def _response_keys_for_symbol(symbol):
+    normalized = symbol.replace("|", ":")
+    return [symbol, normalized]
+
+
+def _quote_item_to_feed(item):
+    if not isinstance(item, dict):
+        return None
+
+    last_price = safe_float(
+        item.get("last_price")
+        or item.get("ltp")
+        or item.get("lastPrice"),
+        None,
+    )
+    if last_price is None:
+        return None
+
+    ohlc = item.get("ohlc") if isinstance(item.get("ohlc"), dict) else {}
+    close_price = safe_float(
+        ohlc.get("close")
+        or item.get("close_price")
+        or item.get("cp")
+        or last_price,
+        last_price,
+    )
+    option_greeks = (
+        item.get("option_greeks")
+        if isinstance(item.get("option_greeks"), dict)
+        else item.get("optionGreeks")
+        if isinstance(item.get("optionGreeks"), dict)
+        else {}
+    )
+
+    feed_payload = {
+        "fullFeed": {
+            "marketFF": {
+                "ltpc": {
+                    "ltp": last_price,
+                    "cp": close_price,
+                },
+                "optionGreeks": {
+                    "delta": safe_float(option_greeks.get("delta"), 0),
+                    "theta": safe_float(option_greeks.get("theta"), 0),
+                    "gamma": safe_float(option_greeks.get("gamma"), 0),
+                    "vega": safe_float(option_greeks.get("vega"), 0),
+                    "rho": safe_float(option_greeks.get("rho"), 0),
+                    "iv": safe_float(option_greeks.get("iv"), 0),
+                },
+                "marketOHLC": {
+                    "ohlc": [
+                        {
+                            "interval": "1d",
+                            "open": safe_float(ohlc.get("open"), last_price),
+                            "high": safe_float(ohlc.get("high"), last_price),
+                            "low": safe_float(ohlc.get("low"), last_price),
+                            "close": close_price,
+                            "vol": safe_float(
+                                item.get("volume")
+                                or item.get("vol")
+                                or item.get("vtt"),
+                                0,
+                            ),
+                            "ts": item.get("last_trade_time")
+                            or item.get("ltt")
+                            or option_chain_data.get("currentTs")
+                            or int(datetime.now().timestamp() * 1000),
+                        }
+                    ]
+                },
+                "vtt": safe_float(
+                    item.get("volume") or item.get("vol") or item.get("vtt"),
+                    0,
+                ),
+                "oi": safe_float(item.get("oi"), 0),
+                "iv": safe_float(
+                    option_greeks.get("iv")
+                    or item.get("iv"),
+                    0,
+                ),
+            }
+        },
+        "requestMode": "rest_quote_fallback",
+    }
+    return feed_payload
+
+
+def fetch_quotes_snapshot(symbols, chunk_size=50):
+    if not TOKEN:
+        print("Quote fallback skip: token missing")
+        return {}
+
+    unique_symbols = []
+    seen = set()
+    for symbol in symbols:
+        if symbol and symbol not in seen:
+            unique_symbols.append(symbol)
+            seen.add(symbol)
+
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {TOKEN}",
+    }
+    aggregated = {}
+
+    for start in range(0, len(unique_symbols), chunk_size):
+        chunk = unique_symbols[start : start + chunk_size]
+        try:
+            response = requests.get(
+                "https://api.upstox.com/v2/market-quote/quotes",
+                headers=headers,
+                params={"symbol": ",".join(chunk)},
+                timeout=20,
+            )
+            if response.status_code != 200:
+                print(
+                    f"Quote fallback batch failed: {response.status_code} {response.text[:160]}"
+                )
+                continue
+
+            payload = response.json().get("data", {})
+            if not isinstance(payload, dict):
+                continue
+
+            for symbol in chunk:
+                item = None
+                for response_key in _response_keys_for_symbol(symbol):
+                    if response_key in payload:
+                        item = payload[response_key]
+                        break
+                if item is None:
+                    continue
+
+                normalized_feed = _quote_item_to_feed(item)
+                if normalized_feed is not None:
+                    aggregated[symbol] = normalized_feed
+        except Exception as exc:
+            print(f"Quote fallback request failed: {exc}")
+
+    return aggregated
+
+
+def apply_quote_fallback(symbols):
+    fallback_feeds = fetch_quotes_snapshot(symbols)
+    if not fallback_feeds:
+        print("Quote fallback se bhi feeds nahi mili.")
+        return False
+
+    option_chain_data.setdefault("feeds", {})
+    option_chain_data["feeds"].update(fallback_feeds)
+    option_chain_data["delta_feeds"] = fallback_feeds
+    option_chain_data["type"] = "quote_fallback"
+    option_chain_data["currentTs"] = int(datetime.now().timestamp() * 1000)
+    option_chain_data["last_live_at"] = datetime.now().isoformat()
+    option_chain_data["version"] = option_chain_data.get("version", 0) + 1
+    option_chain_data["market_open"] = current_market_status() == "live_market"
+    option_chain_data["market_status"] = "rest_fallback"
+    notify_feed_update()
+    print(f"Quote fallback updated feeds: {len(fallback_feeds)}")
+    return True
+
 
 def parse_feed_timestamp(value):
     try:
@@ -534,8 +818,8 @@ def select_atm_strikes(
     return selected
 
 def build_option_chain_payload(
-    symbol: Optional[str] = None,
-    expiry: Optional[str] = None,
+    symbol: str | None = None,
+    expiry: str | None = None,
     delta_only: bool = False,
 ):
     feeds_snapshot = dict(
@@ -600,15 +884,16 @@ def build_option_chain_payload(
         "type": option_chain_data.get("type"),
         "currentTs": option_chain_data.get("currentTs"),
         "is_live": option_chain_data.get("is_live", False),
+        "market_open": option_chain_data.get("market_open", False),
+        "market_status": option_chain_data.get("market_status"),
         "last_live_at": option_chain_data.get("last_live_at"),
-        "data_source": "live" if option_chain_data.get("is_live", False) else "fallback_csv",
+        "data_source": "live" if option_chain_data.get("is_live", False) else "cached_snapshot",
     }
-
 
 @app.get("/option-chain")
 def get_chain(
-    symbol: Optional[str] = Query(default=None),
-    expiry: Optional[str] = Query(default=None),
+    symbol: str | None = Query(default=None),
+    expiry: str | None = Query(default=None),
 ):
     return build_option_chain_payload(symbol=symbol, expiry=expiry)
 
@@ -640,7 +925,7 @@ def get_candles(
         f"{encoded_key}/{unit}/{interval}"
     )
     headers = {
-        "Accept": "*/*",
+        "Accept": "application/json",
         "Authorization": f"Bearer {TOKEN}",
     }
 
@@ -854,15 +1139,36 @@ def start_backend():
     fetcher = UpstoxDataFetcher()
 
     async def main():
+        reconnect_delay = 3
         while True:
+            status = current_market_status()
+            if not should_connect_upstox_feed():
+                set_market_state(live=False, status=status)
+                apply_quote_fallback(cached_keys)
+                sleep_for = min(seconds_until_next_market_window(), 300)
+                print(
+                    f"Market closed mode: {status}. Live feed skip (8:30–16:00 IST weekdays). "
+                    f"Test ke liye .env mein FORCE_LIVE_FEED=true. Next check {sleep_for}s."
+                )
+                await asyncio.sleep(sleep_for)
+                continue
+
+            await fetcher.disconnect()
             if await fetcher.connect():
+                set_market_state(live=True, status=status)
+                reconnect_delay = 3
                 await fetcher.subscribe(cached_keys)
                 await fetcher.fetch_live_data()
             else:
-                option_chain_data["is_live"] = False
+                set_market_state(live=False, status=current_market_status())
+                if apply_quote_fallback(cached_keys):
+                    print("WebSocket fail hua, isliye REST quote fallback se data serve ho raha hai.")
+                if fetcher.last_error_was_403:
+                    reconnect_delay = 3
 
-            print("Reconnect ho raha hai 3 sec me...")
-            await asyncio.sleep(3)
+            print(f"Reconnect ho raha hai {reconnect_delay} sec me...")
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = 3
 
     asyncio.run(main())
 
