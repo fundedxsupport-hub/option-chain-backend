@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-ACCESS_TOKEN = os.getenv("ACCESS_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN") or "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIyREFNNDUiLCJqdGkiOiI2YTBjMTEwMjhhM2E5YjU1MmExZTg5MDkiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3OTE3NTY4MiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc5MjI4MDAwfQ.72AItI-MBZeMUHol8AFmCByx6_0xWByA4GEZ4tqtSLw"
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN") or "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIyREFNNDUiLCJqdGkiOiI2YTBjMTQxYzM1ODEwZDUyYWFmMmU4YTkiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3OTE3NjQ3NywiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc5MjI4MDAwfQ.caCQD8c8eyTJsjHvaR23yAn81veQoKrKWMC9hEbs9HA"
 
 def get_last_price():
     # 2. Dono Indices ki keys (Comma se separate karke)
