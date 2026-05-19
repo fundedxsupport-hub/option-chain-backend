@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-ACCESS_TOKEN = os.getenv("ACCESS_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN") or "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIyREFNNDUiLCJqdGkiOiI2YTA2ZTJmZDViZGYwYTYwNzM1NDU1YTgiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3ODgzNjIyMSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc4ODgyNDAwfQ.JwNKsbYtoImVePsBQt_Pq-beEGYaxRq2KelU5eCtqyc"
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN") or ""
 
 def get_last_price():
     # 2. Dono Indices ki keys (Comma se separate karke)
