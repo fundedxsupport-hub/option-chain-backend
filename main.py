@@ -6,6 +6,7 @@ import json
 import threading
 import base64
 from pathlib import Path
+from typing import Optional
 from urllib.parse import quote
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -37,18 +38,20 @@ def home():
 @app.websocket("/ws/option-chain")
 async def option_chain_ws(
     websocket: WebSocket,
-    symbol: str | None = None,
-    expiry: str | None = None,
+    symbol: Optional[str] = None,
+    expiry: Optional[str] = None,
+    snapshot_interval: float = 12.0,
 ):
     await websocket.accept()
     last_sent_version = -1
     last_snapshot_at = 0.0
+    snapshot_interval = max(5.0, min(float(snapshot_interval or 12.0), 60.0))
     try:
         while True:
             current_version = option_chain_data.get("version", 0)
             now = asyncio.get_running_loop().time()
             should_send_delta = current_version != last_sent_version
-            should_send_snapshot = last_sent_version < 0 or now - last_snapshot_at >= 2.0
+            should_send_snapshot = last_sent_version < 0 or now - last_snapshot_at >= snapshot_interval
 
             if should_send_delta or should_send_snapshot:
                 payload = build_option_chain_payload(
@@ -68,7 +71,7 @@ async def option_chain_ws(
                     last_snapshot_at = now
 
             if option_chain_data.get("market_open", False):
-                await asyncio.to_thread(wait_for_feed_update, last_sent_version, 0.25)
+                await asyncio.to_thread(wait_for_feed_update, last_sent_version, 0.05)
             else:
                 await asyncio.sleep(1)
     except WebSocketDisconnect:
@@ -208,7 +211,7 @@ def get_token_info():
     return "missing", ""
 
 
-def token_expiry_epoch(token: str) -> int | None:
+def token_expiry_epoch(token: str) -> Optional[int]:
     try:
         payload_part = token.split(".")[1]
         padded_payload = payload_part + "=" * (-len(payload_part) % 4)
@@ -818,8 +821,8 @@ def select_atm_strikes(
     return selected
 
 def build_option_chain_payload(
-    symbol: str | None = None,
-    expiry: str | None = None,
+    symbol: Optional[str] = None,
+    expiry: Optional[str] = None,
     delta_only: bool = False,
 ):
     feeds_snapshot = dict(
@@ -892,8 +895,8 @@ def build_option_chain_payload(
 
 @app.get("/option-chain")
 def get_chain(
-    symbol: str | None = Query(default=None),
-    expiry: str | None = Query(default=None),
+    symbol: Optional[str] = Query(default=None),
+    expiry: Optional[str] = Query(default=None),
 ):
     return build_option_chain_payload(symbol=symbol, expiry=expiry)
 
