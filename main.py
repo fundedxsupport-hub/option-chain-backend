@@ -824,10 +824,40 @@ def build_option_chain_payload(
     symbol: Optional[str] = None,
     expiry: Optional[str] = None,
     delta_only: bool = False,
+    summary_only: bool = False,
 ):
     feeds_snapshot = dict(
         option_chain_data.get("delta_feeds" if delta_only else "feeds", {})
     )
+    index_keys = {config["index_key"] for config in INDEX_CONFIG.values()}
+
+    if summary_only:
+        return {
+            "feeds": {
+                key: value
+                for key, value in feeds_snapshot.items()
+                if key in index_keys
+            },
+            "instruments": {},
+            "expiries": {},
+            "subscribed_expiries": {},
+            "selected_symbol": symbol,
+            "selected_expiry": expiry,
+            "cached_feed_count": len(feeds_snapshot),
+            "total_cached_feed_count": len(option_chain_data.get("feeds", {})),
+            "instrument_count": 0,
+            "subscribed_instrument_count": len(instrument_meta),
+            "total_instrument_count": len(all_instrument_meta or instrument_meta),
+            "type": option_chain_data.get("type"),
+            "currentTs": option_chain_data.get("currentTs"),
+            "is_live": option_chain_data.get("is_live", False),
+            "market_open": option_chain_data.get("market_open", False),
+            "market_status": option_chain_data.get("market_status"),
+            "last_live_at": option_chain_data.get("last_live_at"),
+            "data_source": "live" if option_chain_data.get("is_live", False) else "cached_snapshot",
+            "summary_only": True,
+        }
+
     instrument_meta_snapshot = dict(instrument_meta)
     all_instrument_meta_snapshot = dict(all_instrument_meta)
     expiries_snapshot = {key: list(value) for key, value in available_expiries.items()}
@@ -855,9 +885,7 @@ def build_option_chain_payload(
             if value.get("expiry") == expiry
         }
 
-    allowed_keys = set(filtered_meta.keys()) | {
-        config["index_key"] for config in INDEX_CONFIG.values()
-    }
+    allowed_keys = set(filtered_meta.keys()) | index_keys
     filtered_feeds = {
         key: value
         for key, value in feeds_snapshot.items()
@@ -897,8 +925,13 @@ def build_option_chain_payload(
 def get_chain(
     symbol: Optional[str] = Query(default=None),
     expiry: Optional[str] = Query(default=None),
+    summary: bool = Query(default=False),
 ):
-    return build_option_chain_payload(symbol=symbol, expiry=expiry)
+    return build_option_chain_payload(
+        symbol=symbol,
+        expiry=expiry,
+        summary_only=summary,
+    )
 
 
 @app.get("/expiries")
