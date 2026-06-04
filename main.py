@@ -5,6 +5,7 @@ import websockets
 import json
 import threading
 import base64
+from collections import deque
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -44,34 +45,84 @@ async def option_chain_ws(
 ):
     await websocket.accept()
     last_sent_version = -1
+    last_sent_tick_sequence = 0
     last_snapshot_at = 0.0
-    snapshot_interval = max(5.0, min(float(snapshot_interval or 12.0), 60.0))
+    snapshot_interval = max(0.1, min(float(snapshot_interval or 12.0), 60.0))
     try:
+        current_version = option_chain_data.get("version", 0)
+        last_sent_tick_sequence = option_chain_data.get("tick_sequence", 0)
+        await websocket.send_json(
+            {
+                **build_option_chain_payload(symbol=symbol, expiry=expiry),
+                "version": current_version,
+                "tick_sequence": last_sent_tick_sequence,
+                "snapshot": True,
+            }
+        )
+        last_sent_version = current_version
+        last_snapshot_at = asyncio.get_running_loop().time()
+
         while True:
             current_version = option_chain_data.get("version", 0)
             now = asyncio.get_running_loop().time()
-            should_send_delta = current_version != last_sent_version
             should_send_snapshot = last_sent_version < 0 or now - last_snapshot_at >= snapshot_interval
+            queued_ticks = [
+                tick
+                for tick in list(live_tick_history)
+                if tick["sequence"] > last_sent_tick_sequence
+            ]
 
-            if should_send_delta or should_send_snapshot:
-                payload = build_option_chain_payload(
-                    symbol=symbol,
-                    expiry=expiry,
-                    delta_only=not (should_send_snapshot or last_sent_version < 0),
-                )
+            if queued_ticks:
+                for tick in queued_ticks:
+                    await websocket.send_json(
+                        build_live_tick_payload(
+                            tick=tick,
+                            symbol=symbol,
+                            expiry=expiry,
+                        )
+                    )
+                    last_sent_tick_sequence = tick["sequence"]
+                last_sent_version = option_chain_data.get("version", current_version)
+
+            elif current_version != last_sent_version:
                 await websocket.send_json(
                     {
-                        **payload,
+                        **build_option_chain_payload(
+                            symbol=symbol,
+                            expiry=expiry,
+                            delta_only=True,
+                        ),
                         "version": current_version,
-                        "snapshot": should_send_snapshot or last_sent_version < 0,
+                        "tick_sequence": option_chain_data.get("tick_sequence", 0),
+                        "snapshot": False,
                     }
                 )
                 last_sent_version = current_version
-                if should_send_snapshot:
-                    last_snapshot_at = now
+
+            if should_send_snapshot:
+                await websocket.send_json(
+                    {
+                        **build_option_chain_payload(
+                            symbol=symbol,
+                            expiry=expiry,
+                        ),
+                        "version": option_chain_data.get("version", 0),
+                        "tick_sequence": option_chain_data.get("tick_sequence", 0),
+                        "snapshot": True,
+                    }
+                )
+                last_sent_tick_sequence = option_chain_data.get("tick_sequence", last_sent_tick_sequence)
+                last_sent_version = option_chain_data.get("version", last_sent_version)
+                last_snapshot_at = now
 
             if option_chain_data.get("market_open", False):
-                await asyncio.to_thread(wait_for_feed_update, last_sent_version, 0.05)
+                latest_version = await asyncio.to_thread(
+                    wait_for_feed_update,
+                    last_sent_version,
+                    0.05,
+                )
+                if latest_version != last_sent_version:
+                    continue
             else:
                 await asyncio.sleep(1)
     except WebSocketDisconnect:
@@ -88,9 +139,12 @@ option_chain_data = {
     "market_open": False,
     "market_status": "initializing",
     "version": 0,
+    "tick_sequence": 0,
     "delta_feeds": {},
 }
 feed_condition = threading.Condition()
+live_tick_history = deque(maxlen=int(os.getenv("LIVE_TICK_HISTORY_SIZE", "5000")))
+live_tick_sequence = 0
 
 
 def notify_feed_update():
@@ -194,6 +248,41 @@ def set_market_state(*, live, status):
     option_chain_data["is_live"] = live
     option_chain_data["market_open"] = status == "live_market"
     option_chain_data["market_status"] = status
+
+
+def append_live_tick(data_dict, feeds):
+    global live_tick_sequence
+
+    live_tick_sequence += 1
+    current_ts = data_dict.get("currentTs") or int(datetime.now().timestamp() * 1000)
+    market_status = current_market_status()
+    received_at = datetime.now().isoformat()
+
+    option_chain_data.setdefault("feeds", {})
+    option_chain_data["feeds"].update(feeds)
+    option_chain_data["delta_feeds"] = feeds
+    option_chain_data["type"] = data_dict.get("type")
+    option_chain_data["currentTs"] = current_ts
+    set_market_state(live=True, status=market_status)
+    option_chain_data["last_live_at"] = received_at
+    option_chain_data["version"] = option_chain_data.get("version", 0) + 1
+    option_chain_data["tick_sequence"] = live_tick_sequence
+
+    live_tick_history.append(
+        {
+            "sequence": live_tick_sequence,
+            "version": option_chain_data["version"],
+            "feeds": dict(feeds),
+            "type": data_dict.get("type"),
+            "currentTs": current_ts,
+            "is_live": True,
+            "market_open": market_status == "live_market",
+            "market_status": market_status,
+            "last_live_at": received_at,
+        }
+    )
+    notify_feed_update()
+    return live_tick_sequence
 
 
 def get_token_info():
@@ -395,15 +484,7 @@ class UpstoxDataFetcher:
                     print("No feed yet. Waiting...")
                     continue
 
-                option_chain_data.setdefault("feeds", {})
-                option_chain_data["feeds"].update(feeds)
-                option_chain_data["delta_feeds"] = feeds
-                option_chain_data["type"] = data_dict.get("type")
-                option_chain_data["currentTs"] = data_dict.get("currentTs")
-                set_market_state(live=True, status=current_market_status())
-                option_chain_data["last_live_at"] = datetime.now().isoformat()
-                option_chain_data["version"] = option_chain_data.get("version", 0) + 1
-                notify_feed_update()
+                append_live_tick(data_dict, feeds)
 
                 expected_count = len(instrument_meta) + 2
                 cached_count = len(option_chain_data["feeds"])
@@ -819,6 +900,70 @@ def select_atm_strikes(
     print(f"{index_name} selected contracts: {len(selected)}")
 
     return selected
+
+def filtered_feeds_for_request(feeds_snapshot, symbol: Optional[str] = None, expiry: Optional[str] = None):
+    index_keys = {config["index_key"] for config in INDEX_CONFIG.values()}
+    instrument_meta_snapshot = dict(instrument_meta)
+    all_instrument_meta_snapshot = dict(all_instrument_meta)
+
+    if symbol and expiry and instrument_meta_snapshot:
+        filtered_meta = instrument_meta_snapshot
+    else:
+        filtered_meta = all_instrument_meta_snapshot or instrument_meta_snapshot
+
+    if symbol:
+        symbol_upper = symbol.upper()
+        filtered_meta = {
+            key: value
+            for key, value in filtered_meta.items()
+            if value.get("name", "").upper() == symbol_upper
+        }
+
+    if expiry:
+        filtered_meta = {
+            key: value
+            for key, value in filtered_meta.items()
+            if value.get("expiry") == expiry
+        }
+
+    allowed_keys = set(filtered_meta.keys()) | index_keys
+    return {
+        key: value
+        for key, value in feeds_snapshot.items()
+        if key in allowed_keys
+    }
+
+
+def build_live_tick_payload(tick, symbol: Optional[str] = None, expiry: Optional[str] = None):
+    feeds = filtered_feeds_for_request(
+        dict(tick.get("feeds", {})),
+        symbol=symbol,
+        expiry=expiry,
+    )
+    return {
+        "feeds": feeds,
+        "instruments": {},
+        "expiries": {},
+        "subscribed_expiries": {},
+        "selected_symbol": symbol,
+        "selected_expiry": expiry,
+        "cached_feed_count": len(feeds),
+        "total_cached_feed_count": len(option_chain_data.get("feeds", {})),
+        "instrument_count": 0,
+        "subscribed_instrument_count": len(instrument_meta),
+        "total_instrument_count": len(all_instrument_meta or instrument_meta),
+        "type": tick.get("type"),
+        "currentTs": tick.get("currentTs"),
+        "is_live": tick.get("is_live", False),
+        "market_open": tick.get("market_open", False),
+        "market_status": tick.get("market_status"),
+        "last_live_at": tick.get("last_live_at"),
+        "data_source": "live_tick",
+        "version": tick.get("version"),
+        "tick_sequence": tick.get("sequence"),
+        "snapshot": False,
+    }
+
 
 def build_option_chain_payload(
     symbol: Optional[str] = None,
